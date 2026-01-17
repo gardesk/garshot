@@ -13,6 +13,7 @@ use garshot::capture::{
     blend_cursor, capture_full_screen, capture_region, get_cursor_image, Region,
 };
 use garshot::encode::encode_png;
+use garshot::selection::overlay::{interactive_selection, SelectionConfig};
 use garshot::x11::{capture_monitor, get_monitors, Connection, ShmCapture};
 
 #[derive(Parser)]
@@ -89,6 +90,25 @@ enum Command {
         cursor: bool,
     },
 
+    /// Interactive region selection with blur overlay.
+    Select {
+        /// Output file path.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Output format.
+        #[arg(short, long, default_value = "png")]
+        format: String,
+
+        /// Include cursor in screenshot.
+        #[arg(short, long)]
+        cursor: bool,
+
+        /// Blur radius for overlay (default: 15).
+        #[arg(short, long, default_value = "15")]
+        blur: usize,
+    },
+
     /// List available monitors.
     Monitors,
 }
@@ -142,6 +162,17 @@ fn main() -> anyhow::Result<()> {
         }) => {
             let output = output.unwrap_or_else(|| default_output(&format));
             capture_window_cmd(&output, &format, id.as_deref(), decorations, cursor)?;
+            println!("{}", output.display());
+        }
+
+        Some(Command::Select {
+            output,
+            format,
+            cursor,
+            blur,
+        }) => {
+            let output = output.unwrap_or_else(|| default_output(&format));
+            capture_select_cmd(&output, &format, cursor, blur)?;
             println!("{}", output.display());
         }
 
@@ -311,4 +342,55 @@ fn parse_window_id(s: &str) -> anyhow::Result<u32> {
     } else {
         s.parse().context("Invalid decimal window ID")
     }
+}
+
+fn capture_select_cmd(
+    output: &PathBuf,
+    format: &str,
+    include_cursor: bool,
+    blur_radius: usize,
+) -> anyhow::Result<()> {
+    let conn = Connection::new().context("Failed to connect to X11")?;
+    let buffer_size = conn.width as usize * conn.height as usize * 4;
+    let shm = ShmCapture::new(&conn, buffer_size).context("Failed to create SHM buffer")?;
+
+    let config = SelectionConfig {
+        blur_radius,
+        ..Default::default()
+    };
+
+    tracing::info!("Starting interactive selection");
+
+    let region = match interactive_selection(&conn, &shm, &config)? {
+        Some(region) => region,
+        None => {
+            tracing::info!("Selection cancelled");
+            return Ok(());
+        }
+    };
+
+    tracing::info!(
+        "Selected region {}x{}+{}+{}",
+        region.width,
+        region.height,
+        region.x,
+        region.y
+    );
+
+    // Capture the selected region
+    let mut result = capture_region(&conn, &shm, &region)?;
+
+    if include_cursor {
+        if let Ok(cursor) = get_cursor_image(&conn) {
+            blend_cursor(
+                &mut result.data,
+                result.width,
+                result.height,
+                &result.region,
+                &cursor,
+            );
+        }
+    }
+
+    save_image(&result.data, result.width, result.height, output, format)
 }
