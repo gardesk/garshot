@@ -93,7 +93,6 @@ pub fn encode_png_to_vec(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
 
     #[test]
     fn test_encode_png_to_vec() {

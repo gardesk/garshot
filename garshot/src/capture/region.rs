@@ -72,11 +72,18 @@ impl Region {
         let x = self.x.max(0);
         let y = self.y.max(0);
 
+        // Account for pixels clipped off the left/top
+        let x_shift = (x - self.x) as u16;
+        let y_shift = (y - self.y) as u16;
+
+        let adjusted_width = self.width.saturating_sub(x_shift);
+        let adjusted_height = self.height.saturating_sub(y_shift);
+
         let max_width = (screen_width as i16 - x).max(0) as u16;
         let max_height = (screen_height as i16 - y).max(0) as u16;
 
-        let width = self.width.min(max_width);
-        let height = self.height.min(max_height);
+        let width = adjusted_width.min(max_width);
+        let height = adjusted_height.min(max_height);
 
         Self { x, y, width, height }
     }
