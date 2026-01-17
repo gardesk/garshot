@@ -3,7 +3,9 @@
 //! This is the main entry point for the garshot daemon. It can also be used
 //! for one-shot captures without running the daemon.
 
+use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -32,7 +34,7 @@ enum Command {
 
     /// Capture full screen (one-shot, no daemon required).
     Screen {
-        /// Output file path.
+        /// Output file path (use "-" for stdout).
         #[arg(short, long)]
         output: Option<PathBuf>,
 
@@ -51,6 +53,14 @@ enum Command {
         /// Don't copy to clipboard (default: copy to clipboard).
         #[arg(long)]
         no_clipboard: bool,
+
+        /// Delay in seconds before capture.
+        #[arg(long)]
+        delay: Option<u64>,
+
+        /// Show desktop notification on save.
+        #[arg(long)]
+        notify: bool,
     },
 
     /// Capture a region by geometry.
@@ -59,7 +69,7 @@ enum Command {
         #[arg(short, long)]
         geometry: String,
 
-        /// Output file path.
+        /// Output file path (use "-" for stdout).
         #[arg(short, long)]
         output: Option<PathBuf>,
 
@@ -74,6 +84,14 @@ enum Command {
         /// Don't copy to clipboard (default: copy to clipboard).
         #[arg(long)]
         no_clipboard: bool,
+
+        /// Delay in seconds before capture.
+        #[arg(long)]
+        delay: Option<u64>,
+
+        /// Show desktop notification on save.
+        #[arg(long)]
+        notify: bool,
     },
 
     /// Capture a window.
@@ -86,7 +104,7 @@ enum Command {
         #[arg(short, long)]
         decorations: bool,
 
-        /// Output file path.
+        /// Output file path (use "-" for stdout).
         #[arg(short, long)]
         output: Option<PathBuf>,
 
@@ -101,11 +119,19 @@ enum Command {
         /// Don't copy to clipboard (default: copy to clipboard).
         #[arg(long)]
         no_clipboard: bool,
+
+        /// Delay in seconds before capture.
+        #[arg(long)]
+        delay: Option<u64>,
+
+        /// Show desktop notification on save.
+        #[arg(long)]
+        notify: bool,
     },
 
     /// Interactive region selection with blur overlay.
     Select {
-        /// Output file path.
+        /// Output file path (use "-" for stdout).
         #[arg(short, long)]
         output: Option<PathBuf>,
 
@@ -124,6 +150,10 @@ enum Command {
         /// Don't copy to clipboard (default: copy to clipboard).
         #[arg(long)]
         no_clipboard: bool,
+
+        /// Show desktop notification on save.
+        #[arg(long)]
+        notify: bool,
     },
 
     /// List available monitors.
@@ -160,13 +190,31 @@ fn main() -> anyhow::Result<()> {
             monitor,
             cursor,
             no_clipboard,
+            delay,
+            notify,
         }) => {
-            let output = output.unwrap_or_else(|| default_output(&config, &format));
-            capture_screen(&output, &format, monitor.as_deref(), cursor)?;
-            if !no_clipboard {
-                copy_to_clipboard(&output)?;
+            if let Some(secs) = delay {
+                sleep_with_countdown(secs);
             }
-            println!("{}", output.display());
+            let is_stdout = output.as_ref().map(|p| p.as_os_str() == "-").unwrap_or(false);
+            let output_path = if is_stdout {
+                None
+            } else {
+                Some(output.unwrap_or_else(|| default_output(&config, &format)))
+            };
+            let (data, width, height) = capture_screen_raw(&format, monitor.as_deref(), cursor)?;
+            if let Some(ref path) = output_path {
+                save_image(&data, width, height, path, &format)?;
+                if !no_clipboard {
+                    copy_to_clipboard(path)?;
+                }
+                if notify {
+                    send_notification(path, width, height);
+                }
+                println!("{}", path.display());
+            } else {
+                write_stdout(&data, width, height, &format)?;
+            }
         }
 
         Some(Command::Region {
@@ -175,13 +223,31 @@ fn main() -> anyhow::Result<()> {
             format,
             cursor,
             no_clipboard,
+            delay,
+            notify,
         }) => {
-            let output = output.unwrap_or_else(|| default_output(&config, &format));
-            capture_region_cmd(&output, &format, &geometry, cursor)?;
-            if !no_clipboard {
-                copy_to_clipboard(&output)?;
+            if let Some(secs) = delay {
+                sleep_with_countdown(secs);
             }
-            println!("{}", output.display());
+            let is_stdout = output.as_ref().map(|p| p.as_os_str() == "-").unwrap_or(false);
+            let output_path = if is_stdout {
+                None
+            } else {
+                Some(output.unwrap_or_else(|| default_output(&config, &format)))
+            };
+            let (data, width, height) = capture_region_raw(&geometry, cursor)?;
+            if let Some(ref path) = output_path {
+                save_image(&data, width, height, path, &format)?;
+                if !no_clipboard {
+                    copy_to_clipboard(path)?;
+                }
+                if notify {
+                    send_notification(path, width, height);
+                }
+                println!("{}", path.display());
+            } else {
+                write_stdout(&data, width, height, &format)?;
+            }
         }
 
         Some(Command::Window {
@@ -191,13 +257,31 @@ fn main() -> anyhow::Result<()> {
             format,
             cursor,
             no_clipboard,
+            delay,
+            notify,
         }) => {
-            let output = output.unwrap_or_else(|| default_output(&config, &format));
-            capture_window_cmd(&output, &format, id.as_deref(), decorations, cursor)?;
-            if !no_clipboard {
-                copy_to_clipboard(&output)?;
+            if let Some(secs) = delay {
+                sleep_with_countdown(secs);
             }
-            println!("{}", output.display());
+            let is_stdout = output.as_ref().map(|p| p.as_os_str() == "-").unwrap_or(false);
+            let output_path = if is_stdout {
+                None
+            } else {
+                Some(output.unwrap_or_else(|| default_output(&config, &format)))
+            };
+            let (data, width, height) = capture_window_raw(id.as_deref(), decorations, cursor)?;
+            if let Some(ref path) = output_path {
+                save_image(&data, width, height, path, &format)?;
+                if !no_clipboard {
+                    copy_to_clipboard(path)?;
+                }
+                if notify {
+                    send_notification(path, width, height);
+                }
+                println!("{}", path.display());
+            } else {
+                write_stdout(&data, width, height, &format)?;
+            }
         }
 
         Some(Command::Select {
@@ -206,13 +290,28 @@ fn main() -> anyhow::Result<()> {
             cursor,
             blur,
             no_clipboard,
+            notify,
         }) => {
-            let output = output.unwrap_or_else(|| default_output(&config, &format));
-            capture_select_cmd(&output, &format, cursor, blur)?;
-            if !no_clipboard {
-                copy_to_clipboard(&output)?;
+            let is_stdout = output.as_ref().map(|p| p.as_os_str() == "-").unwrap_or(false);
+            let output_path = if is_stdout {
+                None
+            } else {
+                Some(output.unwrap_or_else(|| default_output(&config, &format)))
+            };
+            if let Some((data, width, height)) = capture_select_raw(cursor, blur)? {
+                if let Some(ref path) = output_path {
+                    save_image(&data, width, height, path, &format)?;
+                    if !no_clipboard {
+                        copy_to_clipboard(path)?;
+                    }
+                    if notify {
+                        send_notification(path, width, height);
+                    }
+                    println!("{}", path.display());
+                } else {
+                    write_stdout(&data, width, height, &format)?;
+                }
             }
-            println!("{}", output.display());
         }
 
         Some(Command::Monitors) => {
@@ -292,80 +391,6 @@ fn capture_screen(
     save_image(&result.data, result.width, result.height, output, format)
 }
 
-fn capture_region_cmd(
-    output: &PathBuf,
-    format: &str,
-    geometry: &str,
-    include_cursor: bool,
-) -> anyhow::Result<()> {
-    let conn = Connection::new().context("Failed to connect to X11")?;
-    let buffer_size = conn.width as usize * conn.height as usize * 4;
-    let shm = ShmCapture::new(&conn, buffer_size).context("Failed to create SHM buffer")?;
-
-    let region = Region::from_geometry(geometry).context("Invalid geometry")?;
-    tracing::info!(
-        "Capturing region {}x{}+{}+{} to {}",
-        region.width,
-        region.height,
-        region.x,
-        region.y,
-        output.display()
-    );
-
-    let mut result = capture_region(&conn, &shm, &region)?;
-
-    if include_cursor {
-        if let Ok(cursor) = get_cursor_image(&conn) {
-            blend_cursor(
-                &mut result.data,
-                result.width,
-                result.height,
-                &result.region,
-                &cursor,
-            );
-        }
-    }
-
-    save_image(&result.data, result.width, result.height, output, format)
-}
-
-fn capture_window_cmd(
-    output: &PathBuf,
-    format: &str,
-    window_id: Option<&str>,
-    decorations: bool,
-    include_cursor: bool,
-) -> anyhow::Result<()> {
-    use garshot::capture::{capture_active_window, capture_window, get_active_window};
-
-    let conn = Connection::new().context("Failed to connect to X11")?;
-    let buffer_size = conn.width as usize * conn.height as usize * 4;
-    let shm = ShmCapture::new(&conn, buffer_size).context("Failed to create SHM buffer")?;
-
-    let mut result = if let Some(id_str) = window_id {
-        let id = parse_window_id(id_str)?;
-        tracing::info!("Capturing window 0x{:x} to {}", id, output.display());
-        capture_window(&conn, &shm, id, decorations)?
-    } else {
-        let active = get_active_window(&conn)?;
-        tracing::info!("Capturing active window 0x{:x} to {}", active, output.display());
-        capture_active_window(&conn, &shm, decorations)?
-    };
-
-    if include_cursor {
-        if let Ok(cursor) = get_cursor_image(&conn) {
-            blend_cursor(
-                &mut result.data,
-                result.width,
-                result.height,
-                &result.region,
-                &cursor,
-            );
-        }
-    }
-
-    save_image(&result.data, result.width, result.height, output, format)
-}
 
 fn save_image(
     data: &[u8],
@@ -389,57 +414,6 @@ fn parse_window_id(s: &str) -> anyhow::Result<u32> {
     } else {
         s.parse().context("Invalid decimal window ID")
     }
-}
-
-fn capture_select_cmd(
-    output: &PathBuf,
-    format: &str,
-    include_cursor: bool,
-    blur_radius: usize,
-) -> anyhow::Result<()> {
-    let conn = Connection::new().context("Failed to connect to X11")?;
-    let buffer_size = conn.width as usize * conn.height as usize * 4;
-    let shm = ShmCapture::new(&conn, buffer_size).context("Failed to create SHM buffer")?;
-
-    let config = SelectionConfig {
-        blur_radius,
-        ..Default::default()
-    };
-
-    tracing::info!("Starting interactive selection");
-
-    let region = match interactive_selection(&conn, &shm, &config)? {
-        Some(region) => region,
-        None => {
-            tracing::info!("Selection cancelled");
-            return Ok(());
-        }
-    };
-
-    tracing::info!(
-        "Selected region {}x{}+{}+{}",
-        region.width,
-        region.height,
-        region.x,
-        region.y
-    );
-
-    // Capture the selected region
-    let mut result = capture_region(&conn, &shm, &region)?;
-
-    if include_cursor {
-        if let Ok(cursor) = get_cursor_image(&conn) {
-            blend_cursor(
-                &mut result.data,
-                result.width,
-                result.height,
-                &result.region,
-                &cursor,
-            );
-        }
-    }
-
-    save_image(&result.data, result.width, result.height, output, format)
 }
 
 fn copy_to_clipboard(path: &PathBuf) -> anyhow::Result<()> {
@@ -485,6 +459,197 @@ fn copy_to_clipboard(path: &PathBuf) -> anyhow::Result<()> {
             }
         }
     }
+}
+
+fn sleep_with_countdown(secs: u64) {
+    for i in (1..=secs).rev() {
+        eprint!("\rCapturing in {}... ", i);
+        std::io::stderr().flush().ok();
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    eprintln!("\rCapturing now!     ");
+}
+
+fn send_notification(path: &PathBuf, width: u32, height: u32) {
+    let summary = "Screenshot saved";
+    let body = format!("{}x{} → {}", width, height, path.display());
+
+    // Try notify-send (most common)
+    let result = std::process::Command::new("notify-send")
+        .args(["-i", "camera-photo", "-a", "garshot", summary, &body])
+        .status();
+
+    if result.is_err() || !result.unwrap().success() {
+        tracing::debug!("notify-send not available or failed");
+    }
+}
+
+fn write_stdout(data: &[u8], width: u32, height: u32, format: &str) -> anyhow::Result<()> {
+    let encoded = encode_to_vec(data, width, height, format)?;
+    std::io::stdout().write_all(&encoded)?;
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+fn encode_to_vec(data: &[u8], width: u32, height: u32, format: &str) -> anyhow::Result<Vec<u8>> {
+    garshot::encode::encode_to_vec(data, width, height, format, 90)
+        .context("Failed to encode image")
+}
+
+fn capture_screen_raw(
+    _format: &str,
+    monitor: Option<&str>,
+    include_cursor: bool,
+) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    let conn = Connection::new().context("Failed to connect to X11")?;
+    let buffer_size = conn.width as usize * conn.height as usize * 4;
+    let shm = ShmCapture::new(&conn, buffer_size).context("Failed to create SHM buffer")?;
+
+    let mut result = if let Some(monitor_name) = monitor {
+        tracing::info!("Capturing monitor {}", monitor_name);
+        capture_monitor(&conn, &shm, monitor_name)?
+    } else {
+        tracing::info!("Capturing full screen");
+        let r = capture_full_screen(&conn, &shm)?;
+        garshot::capture::RegionCaptureResult {
+            data: r.data,
+            width: r.width,
+            height: r.height,
+            region: Region::new(0, 0, conn.width, conn.height),
+        }
+    };
+
+    if include_cursor {
+        if let Ok(cursor) = get_cursor_image(&conn) {
+            blend_cursor(
+                &mut result.data,
+                result.width,
+                result.height,
+                &result.region,
+                &cursor,
+            );
+        }
+    }
+
+    Ok((result.data, result.width, result.height))
+}
+
+fn capture_region_raw(
+    geometry: &str,
+    include_cursor: bool,
+) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    let conn = Connection::new().context("Failed to connect to X11")?;
+    let buffer_size = conn.width as usize * conn.height as usize * 4;
+    let shm = ShmCapture::new(&conn, buffer_size).context("Failed to create SHM buffer")?;
+
+    let region = Region::from_geometry(geometry).context("Invalid geometry")?;
+    tracing::info!(
+        "Capturing region {}x{}+{}+{}",
+        region.width,
+        region.height,
+        region.x,
+        region.y
+    );
+
+    let mut result = capture_region(&conn, &shm, &region)?;
+
+    if include_cursor {
+        if let Ok(cursor) = get_cursor_image(&conn) {
+            blend_cursor(
+                &mut result.data,
+                result.width,
+                result.height,
+                &result.region,
+                &cursor,
+            );
+        }
+    }
+
+    Ok((result.data, result.width, result.height))
+}
+
+fn capture_window_raw(
+    window_id: Option<&str>,
+    decorations: bool,
+    include_cursor: bool,
+) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    use garshot::capture::{capture_active_window, capture_window, get_active_window};
+
+    let conn = Connection::new().context("Failed to connect to X11")?;
+    let buffer_size = conn.width as usize * conn.height as usize * 4;
+    let shm = ShmCapture::new(&conn, buffer_size).context("Failed to create SHM buffer")?;
+
+    let mut result = if let Some(id_str) = window_id {
+        let id = parse_window_id(id_str)?;
+        tracing::info!("Capturing window 0x{:x}", id);
+        capture_window(&conn, &shm, id, decorations)?
+    } else {
+        let active = get_active_window(&conn)?;
+        tracing::info!("Capturing active window 0x{:x}", active);
+        capture_active_window(&conn, &shm, decorations)?
+    };
+
+    if include_cursor {
+        if let Ok(cursor) = get_cursor_image(&conn) {
+            blend_cursor(
+                &mut result.data,
+                result.width,
+                result.height,
+                &result.region,
+                &cursor,
+            );
+        }
+    }
+
+    Ok((result.data, result.width, result.height))
+}
+
+fn capture_select_raw(
+    include_cursor: bool,
+    blur_radius: usize,
+) -> anyhow::Result<Option<(Vec<u8>, u32, u32)>> {
+    let conn = Connection::new().context("Failed to connect to X11")?;
+    let buffer_size = conn.width as usize * conn.height as usize * 4;
+    let shm = ShmCapture::new(&conn, buffer_size).context("Failed to create SHM buffer")?;
+
+    let config = SelectionConfig {
+        blur_radius,
+        ..Default::default()
+    };
+
+    tracing::info!("Starting interactive selection");
+
+    let region = match interactive_selection(&conn, &shm, &config)? {
+        Some(region) => region,
+        None => {
+            tracing::info!("Selection cancelled");
+            return Ok(None);
+        }
+    };
+
+    tracing::info!(
+        "Selected region {}x{}+{}+{}",
+        region.width,
+        region.height,
+        region.x,
+        region.y
+    );
+
+    let mut result = capture_region(&conn, &shm, &region)?;
+
+    if include_cursor {
+        if let Ok(cursor) = get_cursor_image(&conn) {
+            blend_cursor(
+                &mut result.data,
+                result.width,
+                result.height,
+                &result.region,
+                &cursor,
+            );
+        }
+    }
+
+    Ok(Some((result.data, result.width, result.height)))
 }
 
 fn run_daemon() -> anyhow::Result<()> {

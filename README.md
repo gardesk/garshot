@@ -22,20 +22,21 @@ Build:
 Runtime:
 - X11
 - xclip (for clipboard)
+- libnotify (for --notify, optional)
 
 ### Fedora/RHEL
 ```sh
-sudo dnf install libxcb-devel libX11-devel cairo-devel xclip
+sudo dnf install libxcb-devel libX11-devel cairo-devel xclip libnotify
 ```
 
 ### Debian/Ubuntu
 ```sh
-sudo apt install libxcb1-dev libx11-dev libcairo2-dev xclip
+sudo apt install libxcb1-dev libx11-dev libcairo2-dev xclip libnotify-bin
 ```
 
 ### Arch
 ```sh
-sudo pacman -S libxcb libx11 cairo xclip
+sudo pacman -S libxcb libx11 cairo xclip libnotify
 ```
 
 ## Build
@@ -65,6 +66,9 @@ garshot screen                     # All monitors
 garshot screen -m DP-1             # Specific monitor
 garshot screen -c                  # Include cursor
 garshot screen -f jpeg -o shot.jpg # JPEG output
+garshot screen --delay 3           # 3 second countdown
+garshot screen --notify            # Desktop notification on save
+garshot screen -o - | feh -        # Pipe to viewer
 ```
 
 ### Interactive selection
@@ -99,10 +103,12 @@ garshot monitors
 
 | Option | Description |
 |--------|-------------|
-| `-o, --output <PATH>` | Output file path |
+| `-o, --output <PATH>` | Output file path (use `-` for stdout) |
 | `-f, --format <FMT>` | png, jpeg, webp (default: png) |
 | `-c, --cursor` | Include cursor in capture |
 | `--no-clipboard` | Don't copy to clipboard |
+| `--delay <SECS>` | Delay before capture (screen/region/window) |
+| `--notify` | Show desktop notification on save |
 
 ## Configuration
 
