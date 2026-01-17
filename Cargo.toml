@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = ["garshot", "garshotctl", "garshot-ipc"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/gardesk/garshot"
+authors = ["mfwolffe"]
+
+[workspace.dependencies]
+# X11
+x11rb = { version = "0.13", features = ["randr", "shm", "xfixes", "shape"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full", "signal"] }
+
+# Image encoding
+png = "0.17"
+image = { version = "0.25", default-features = false, features = ["jpeg", "webp"] }
+
+# Configuration
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Graphics (for blur)
+cairo-rs = { version = "0.20", features = ["xcb"] }
+
+# Time
+chrono = "0.4"
+
+# Directories
+dirs = "6"
+
+# IPC (internal)
+garshot-ipc = { path = "garshot-ipc" }
