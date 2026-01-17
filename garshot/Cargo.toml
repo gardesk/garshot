@@ -53,5 +53,8 @@ dirs = { workspace = true }
 # System
 libc = "0.2"
 
+# Encoding
+base64 = { workspace = true }
+
 # IPC
 garshot-ipc = { workspace = true }

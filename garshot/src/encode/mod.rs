@@ -2,7 +2,7 @@
 
 pub mod png;
 
-pub use self::png::encode_png;
+pub use self::png::{encode_png, encode_png_to_vec};
 
 use std::path::Path;
 

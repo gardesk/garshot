@@ -46,5 +46,8 @@ chrono = "0.4"
 # Directories
 dirs = "6"
 
+# Encoding
+base64 = "0.22"
+
 # IPC (internal)
 garshot-ipc = { path = "garshot-ipc" }

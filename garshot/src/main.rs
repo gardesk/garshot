@@ -193,8 +193,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         Some(Command::Daemon) => {
-            tracing::info!("Starting garshot daemon...");
-            tracing::warn!("Daemon mode not yet implemented");
+            run_daemon()?;
         }
     }
 
@@ -393,4 +392,23 @@ fn capture_select_cmd(
     }
 
     save_image(&result.data, result.width, result.height, output, format)
+}
+
+fn run_daemon() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use garshot::daemon::{run_server, DaemonState};
+
+    tracing::info!("Starting garshot daemon...");
+
+    let state = DaemonState::new().context("Failed to initialize daemon state")?;
+    let state = Arc::new(Mutex::new(state));
+
+    let rt = tokio::runtime::Runtime::new().context("Failed to create async runtime")?;
+    rt.block_on(async {
+        run_server(state).await
+    })?;
+
+    tracing::info!("Daemon stopped");
+    Ok(())
 }
