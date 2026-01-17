@@ -12,6 +12,7 @@ use tracing_subscriber::EnvFilter;
 use garshot::capture::{
     blend_cursor, capture_full_screen, capture_region, get_cursor_image, Region,
 };
+use garshot::config::{load_config, Config};
 use garshot::encode::encode_png;
 use garshot::selection::overlay::{interactive_selection, SelectionConfig};
 use garshot::x11::{capture_monitor, get_monitors, Connection, ShmCapture};
@@ -122,12 +123,17 @@ fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
+    // Load config for default values
+    let config = load_config().unwrap_or_else(|e| {
+        tracing::debug!("Failed to load config: {}, using defaults", e);
+        Config::default()
+    });
+
     match args.command {
         None => {
-            let format = "png";
-            let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-            let output = PathBuf::from(format!("screenshot-{}.{}", timestamp, format));
-            capture_screen(&output, format, None, false)?;
+            let format = &config.general.format;
+            let output = default_output(&config, format);
+            capture_screen(&output, format, None, config.general.include_cursor)?;
             println!("{}", output.display());
         }
 
@@ -137,7 +143,7 @@ fn main() -> anyhow::Result<()> {
             monitor,
             cursor,
         }) => {
-            let output = output.unwrap_or_else(|| default_output(&format));
+            let output = output.unwrap_or_else(|| default_output(&config, &format));
             capture_screen(&output, &format, monitor.as_deref(), cursor)?;
             println!("{}", output.display());
         }
@@ -148,7 +154,7 @@ fn main() -> anyhow::Result<()> {
             format,
             cursor,
         }) => {
-            let output = output.unwrap_or_else(|| default_output(&format));
+            let output = output.unwrap_or_else(|| default_output(&config, &format));
             capture_region_cmd(&output, &format, &geometry, cursor)?;
             println!("{}", output.display());
         }
@@ -160,7 +166,7 @@ fn main() -> anyhow::Result<()> {
             format,
             cursor,
         }) => {
-            let output = output.unwrap_or_else(|| default_output(&format));
+            let output = output.unwrap_or_else(|| default_output(&config, &format));
             capture_window_cmd(&output, &format, id.as_deref(), decorations, cursor)?;
             println!("{}", output.display());
         }
@@ -171,7 +177,7 @@ fn main() -> anyhow::Result<()> {
             cursor,
             blur,
         }) => {
-            let output = output.unwrap_or_else(|| default_output(&format));
+            let output = output.unwrap_or_else(|| default_output(&config, &format));
             capture_select_cmd(&output, &format, cursor, blur)?;
             println!("{}", output.display());
         }
@@ -200,9 +206,18 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn default_output(format: &str) -> PathBuf {
+fn default_output(config: &Config, format: &str) -> PathBuf {
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    PathBuf::from(format!("screenshot-{}.{}", timestamp, format))
+    let filename = format!("screenshot-{}.{}", timestamp, format);
+
+    // Ensure save directory exists
+    let save_dir = &config.general.save_dir;
+    if let Err(e) = std::fs::create_dir_all(save_dir) {
+        tracing::warn!("Failed to create save directory {}: {}", save_dir.display(), e);
+        return PathBuf::from(filename);
+    }
+
+    save_dir.join(filename)
 }
 
 fn capture_screen(
