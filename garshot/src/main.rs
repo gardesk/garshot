@@ -9,9 +9,11 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use garshot::capture::capture_full_screen;
+use garshot::capture::{
+    blend_cursor, capture_full_screen, capture_region, get_cursor_image, Region,
+};
 use garshot::encode::encode_png;
-use garshot::x11::{Connection, ShmCapture};
+use garshot::x11::{capture_monitor, get_monitors, Connection, ShmCapture};
 
 #[derive(Parser)]
 #[command(name = "garshot", about = "Screenshot utility for the gar desktop suite")]
@@ -35,13 +37,63 @@ enum Command {
         /// Output format (png, jpeg, webp).
         #[arg(short, long, default_value = "png")]
         format: String,
+
+        /// Specific monitor name.
+        #[arg(short, long)]
+        monitor: Option<String>,
+
+        /// Include cursor in screenshot.
+        #[arg(short, long)]
+        cursor: bool,
     },
 
-    // TODO: Add Region and Window commands in Sprint 2-3
+    /// Capture a region by geometry.
+    Region {
+        /// Region geometry: WxH+X+Y (e.g., 800x600+100+50).
+        #[arg(short, long)]
+        geometry: String,
+
+        /// Output file path.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Output format.
+        #[arg(short, long, default_value = "png")]
+        format: String,
+
+        /// Include cursor in screenshot.
+        #[arg(short, long)]
+        cursor: bool,
+    },
+
+    /// Capture a window.
+    Window {
+        /// Window ID (hex or decimal). Defaults to active window.
+        #[arg(short, long)]
+        id: Option<String>,
+
+        /// Include window decorations.
+        #[arg(short, long)]
+        decorations: bool,
+
+        /// Output file path.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Output format.
+        #[arg(short, long, default_value = "png")]
+        format: String,
+
+        /// Include cursor in screenshot.
+        #[arg(short, long)]
+        cursor: bool,
+    },
+
+    /// List available monitors.
+    Monitors,
 }
 
 fn main() -> anyhow::Result<()> {
-    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -52,29 +104,65 @@ fn main() -> anyhow::Result<()> {
 
     match args.command {
         None => {
-            // Default: one-shot screen capture with default settings
             let format = "png";
             let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
             let output = PathBuf::from(format!("screenshot-{}.{}", timestamp, format));
-
-            one_shot_screen(&output, format)?;
+            capture_screen(&output, format, None, false)?;
             println!("{}", output.display());
         }
 
-        Some(Command::Screen { output, format }) => {
-            // One-shot screen capture
-            let output = output.unwrap_or_else(|| {
-                let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-                PathBuf::from(format!("screenshot-{}.{}", timestamp, format))
-            });
-
-            one_shot_screen(&output, &format)?;
+        Some(Command::Screen {
+            output,
+            format,
+            monitor,
+            cursor,
+        }) => {
+            let output = output.unwrap_or_else(|| default_output(&format));
+            capture_screen(&output, &format, monitor.as_deref(), cursor)?;
             println!("{}", output.display());
+        }
+
+        Some(Command::Region {
+            geometry,
+            output,
+            format,
+            cursor,
+        }) => {
+            let output = output.unwrap_or_else(|| default_output(&format));
+            capture_region_cmd(&output, &format, &geometry, cursor)?;
+            println!("{}", output.display());
+        }
+
+        Some(Command::Window {
+            id,
+            decorations,
+            output,
+            format,
+            cursor,
+        }) => {
+            let output = output.unwrap_or_else(|| default_output(&format));
+            capture_window_cmd(&output, &format, id.as_deref(), decorations, cursor)?;
+            println!("{}", output.display());
+        }
+
+        Some(Command::Monitors) => {
+            let conn = Connection::new().context("Failed to connect to X11")?;
+            let monitors = get_monitors(&conn)?;
+            for m in monitors {
+                println!(
+                    "{} {}x{}+{}+{}{}",
+                    m.name,
+                    m.width,
+                    m.height,
+                    m.x,
+                    m.y,
+                    if m.primary { " (primary)" } else { "" }
+                );
+            }
         }
 
         Some(Command::Daemon) => {
             tracing::info!("Starting garshot daemon...");
-            // TODO: Implement daemon mode in Sprint 4
             tracing::warn!("Daemon mode not yet implemented");
         }
     }
@@ -82,39 +170,145 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Perform a one-shot screen capture.
-fn one_shot_screen(output: &PathBuf, format: &str) -> anyhow::Result<()> {
-    tracing::info!("Capturing full screen to {}", output.display());
+fn default_output(format: &str) -> PathBuf {
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    PathBuf::from(format!("screenshot-{}.{}", timestamp, format))
+}
 
-    // Connect to X11
+fn capture_screen(
+    output: &PathBuf,
+    format: &str,
+    monitor: Option<&str>,
+    include_cursor: bool,
+) -> anyhow::Result<()> {
     let conn = Connection::new().context("Failed to connect to X11")?;
-
-    tracing::debug!("Screen size: {}x{}", conn.width, conn.height);
-
-    // Create shared memory buffer
     let buffer_size = conn.width as usize * conn.height as usize * 4;
     let shm = ShmCapture::new(&conn, buffer_size).context("Failed to create SHM buffer")?;
 
-    // Capture screen
-    let result = capture_full_screen(&conn, &shm).context("Failed to capture screen")?;
+    let mut result = if let Some(monitor_name) = monitor {
+        tracing::info!("Capturing monitor {} to {}", monitor_name, output.display());
+        capture_monitor(&conn, &shm, monitor_name)?
+    } else {
+        tracing::info!("Capturing full screen to {}", output.display());
+        let r = capture_full_screen(&conn, &shm)?;
+        garshot::capture::RegionCaptureResult {
+            data: r.data,
+            width: r.width,
+            height: r.height,
+            region: Region::new(0, 0, conn.width, conn.height),
+        }
+    };
 
-    tracing::info!(
-        "Captured {}x{} ({} bytes)",
-        result.width,
-        result.height,
-        result.data.len()
-    );
-
-    // Encode and save
-    match format {
-        "png" => encode_png(&result.data, result.width, result.height, output)
-            .context("Failed to encode PNG")?,
-        _ => {
-            anyhow::bail!("Unsupported format: {} (only png supported in Sprint 1)", format);
+    if include_cursor {
+        if let Ok(cursor) = get_cursor_image(&conn) {
+            blend_cursor(
+                &mut result.data,
+                result.width,
+                result.height,
+                &result.region,
+                &cursor,
+            );
         }
     }
 
-    tracing::info!("Saved to {}", output.display());
+    save_image(&result.data, result.width, result.height, output, format)
+}
 
+fn capture_region_cmd(
+    output: &PathBuf,
+    format: &str,
+    geometry: &str,
+    include_cursor: bool,
+) -> anyhow::Result<()> {
+    let conn = Connection::new().context("Failed to connect to X11")?;
+    let buffer_size = conn.width as usize * conn.height as usize * 4;
+    let shm = ShmCapture::new(&conn, buffer_size).context("Failed to create SHM buffer")?;
+
+    let region = Region::from_geometry(geometry).context("Invalid geometry")?;
+    tracing::info!(
+        "Capturing region {}x{}+{}+{} to {}",
+        region.width,
+        region.height,
+        region.x,
+        region.y,
+        output.display()
+    );
+
+    let mut result = capture_region(&conn, &shm, &region)?;
+
+    if include_cursor {
+        if let Ok(cursor) = get_cursor_image(&conn) {
+            blend_cursor(
+                &mut result.data,
+                result.width,
+                result.height,
+                &result.region,
+                &cursor,
+            );
+        }
+    }
+
+    save_image(&result.data, result.width, result.height, output, format)
+}
+
+fn capture_window_cmd(
+    output: &PathBuf,
+    format: &str,
+    window_id: Option<&str>,
+    decorations: bool,
+    include_cursor: bool,
+) -> anyhow::Result<()> {
+    use garshot::capture::{capture_active_window, capture_window, get_active_window};
+
+    let conn = Connection::new().context("Failed to connect to X11")?;
+    let buffer_size = conn.width as usize * conn.height as usize * 4;
+    let shm = ShmCapture::new(&conn, buffer_size).context("Failed to create SHM buffer")?;
+
+    let mut result = if let Some(id_str) = window_id {
+        let id = parse_window_id(id_str)?;
+        tracing::info!("Capturing window 0x{:x} to {}", id, output.display());
+        capture_window(&conn, &shm, id, decorations)?
+    } else {
+        let active = get_active_window(&conn)?;
+        tracing::info!("Capturing active window 0x{:x} to {}", active, output.display());
+        capture_active_window(&conn, &shm, decorations)?
+    };
+
+    if include_cursor {
+        if let Ok(cursor) = get_cursor_image(&conn) {
+            blend_cursor(
+                &mut result.data,
+                result.width,
+                result.height,
+                &result.region,
+                &cursor,
+            );
+        }
+    }
+
+    save_image(&result.data, result.width, result.height, output, format)
+}
+
+fn save_image(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    output: &PathBuf,
+    format: &str,
+) -> anyhow::Result<()> {
+    match format {
+        "png" => encode_png(data, width, height, output).context("Failed to encode PNG")?,
+        _ => anyhow::bail!("Unsupported format: {}", format),
+    }
+    tracing::info!("Saved {}x{} to {}", width, height, output.display());
     Ok(())
+}
+
+fn parse_window_id(s: &str) -> anyhow::Result<u32> {
+    let s = s.trim();
+    if s.starts_with("0x") || s.starts_with("0X") {
+        u32::from_str_radix(&s[2..], 16).context("Invalid hex window ID")
+    } else {
+        s.parse().context("Invalid decimal window ID")
+    }
 }
