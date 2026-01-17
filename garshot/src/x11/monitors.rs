@@ -1,6 +1,5 @@
 //! Multi-monitor support via XRandR.
 
-use x11rb::connection::Connection as X11Connection;
 use x11rb::protocol::randr::{self, ConnectionExt as RandrExt};
 
 use crate::capture::region::{capture_region, Region, RegionCaptureResult};

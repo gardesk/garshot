@@ -1,6 +1,5 @@
 //! Window capture functionality.
 
-use x11rb::connection::Connection as X11Connection;
 use x11rb::protocol::xproto::*;
 
 use crate::capture::region::{capture_region, Region, RegionCaptureResult};

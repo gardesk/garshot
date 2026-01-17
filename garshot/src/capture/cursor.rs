@@ -1,7 +1,6 @@
 //! Cursor capture and blending via XFixes.
 
-use x11rb::connection::Connection as X11Connection;
-use x11rb::protocol::xfixes::{self, ConnectionExt as XfixesExt};
+use x11rb::protocol::xfixes::ConnectionExt as XfixesExt;
 
 use crate::capture::Region;
 use crate::error::{GarshotError, Result};
