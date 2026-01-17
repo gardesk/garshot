@@ -22,7 +22,9 @@
 pub mod capture;
 pub mod encode;
 pub mod error;
+pub mod selection;
 pub mod x11;
 
 pub use error::{GarshotError, Result};
+pub use selection::{interactive_selection, SelectionResult};
 pub use x11::{Connection, ShmCapture};
