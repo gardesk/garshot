@@ -5,10 +5,11 @@
 
 use x11rb::connection::Connection as X11Connection;
 use x11rb::protocol::xproto::{
-    ChangeGCAux, ConnectionExt, CreateGCAux, CreateWindowAux, Cursor,
-    EventMask, Font, Gcontext, GrabMode, GrabStatus, ImageFormat, Pixmap, Rectangle,
+    AtomEnum, ChangeGCAux, ConnectionExt, CreateGCAux, CreateWindowAux, Cursor,
+    EventMask, Font, Gcontext, GrabMode, GrabStatus, ImageFormat, Pixmap, PropMode, Rectangle,
     Window, WindowClass,
 };
+use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 
 use super::blur::blur_rgba;
 use super::events::{SelectionHandler, SelectionResult};
@@ -200,6 +201,28 @@ impl Overlay {
                 .cursor(cursor),
         )?;
 
+        // Tell compositor to bypass this window (no blur/effects from picom)
+        let bypass_atom = conn.conn.intern_atom(false, b"_NET_WM_BYPASS_COMPOSITOR")?.reply()?.atom;
+        WrapperConnectionExt::change_property32(
+            &conn.conn,
+            PropMode::REPLACE,
+            window,
+            bypass_atom,
+            AtomEnum::CARDINAL,
+            &[1], // 1 = bypass compositor
+        )?;
+
+        // Set WM_CLASS for identification
+        let wm_class = b"garshot\0garshot\0";
+        WrapperConnectionExt::change_property8(
+            &conn.conn,
+            PropMode::REPLACE,
+            window,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            wm_class,
+        )?;
+
         conn.conn.flush()?;
 
         Ok(Self {
@@ -285,7 +308,7 @@ impl Overlay {
 
         if let Some(region) = region {
             if region.width > 0 && region.height > 0 {
-                // Copy selection region from original pixmap (single X11 request!)
+                // Copy selection region from original pixmap
                 conn.conn.copy_area(
                     self.original_pixmap,
                     self.window,

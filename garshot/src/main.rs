@@ -47,6 +47,10 @@ enum Command {
         /// Include cursor in screenshot.
         #[arg(short, long)]
         cursor: bool,
+
+        /// Don't copy to clipboard (default: copy to clipboard).
+        #[arg(long)]
+        no_clipboard: bool,
     },
 
     /// Capture a region by geometry.
@@ -66,6 +70,10 @@ enum Command {
         /// Include cursor in screenshot.
         #[arg(short, long)]
         cursor: bool,
+
+        /// Don't copy to clipboard (default: copy to clipboard).
+        #[arg(long)]
+        no_clipboard: bool,
     },
 
     /// Capture a window.
@@ -89,6 +97,10 @@ enum Command {
         /// Include cursor in screenshot.
         #[arg(short, long)]
         cursor: bool,
+
+        /// Don't copy to clipboard (default: copy to clipboard).
+        #[arg(long)]
+        no_clipboard: bool,
     },
 
     /// Interactive region selection with blur overlay.
@@ -108,6 +120,10 @@ enum Command {
         /// Blur radius for overlay (default: 15).
         #[arg(short, long, default_value = "15")]
         blur: usize,
+
+        /// Don't copy to clipboard (default: copy to clipboard).
+        #[arg(long)]
+        no_clipboard: bool,
     },
 
     /// List available monitors.
@@ -134,6 +150,7 @@ fn main() -> anyhow::Result<()> {
             let format = &config.general.format;
             let output = default_output(&config, format);
             capture_screen(&output, format, None, config.general.include_cursor)?;
+            copy_to_clipboard(&output)?;
             println!("{}", output.display());
         }
 
@@ -142,9 +159,13 @@ fn main() -> anyhow::Result<()> {
             format,
             monitor,
             cursor,
+            no_clipboard,
         }) => {
             let output = output.unwrap_or_else(|| default_output(&config, &format));
             capture_screen(&output, &format, monitor.as_deref(), cursor)?;
+            if !no_clipboard {
+                copy_to_clipboard(&output)?;
+            }
             println!("{}", output.display());
         }
 
@@ -153,9 +174,13 @@ fn main() -> anyhow::Result<()> {
             output,
             format,
             cursor,
+            no_clipboard,
         }) => {
             let output = output.unwrap_or_else(|| default_output(&config, &format));
             capture_region_cmd(&output, &format, &geometry, cursor)?;
+            if !no_clipboard {
+                copy_to_clipboard(&output)?;
+            }
             println!("{}", output.display());
         }
 
@@ -165,9 +190,13 @@ fn main() -> anyhow::Result<()> {
             output,
             format,
             cursor,
+            no_clipboard,
         }) => {
             let output = output.unwrap_or_else(|| default_output(&config, &format));
             capture_window_cmd(&output, &format, id.as_deref(), decorations, cursor)?;
+            if !no_clipboard {
+                copy_to_clipboard(&output)?;
+            }
             println!("{}", output.display());
         }
 
@@ -176,9 +205,13 @@ fn main() -> anyhow::Result<()> {
             format,
             cursor,
             blur,
+            no_clipboard,
         }) => {
             let output = output.unwrap_or_else(|| default_output(&config, &format));
             capture_select_cmd(&output, &format, cursor, blur)?;
+            if !no_clipboard {
+                copy_to_clipboard(&output)?;
+            }
             println!("{}", output.display());
         }
 
@@ -407,6 +440,51 @@ fn capture_select_cmd(
     }
 
     save_image(&result.data, result.width, result.height, output, format)
+}
+
+fn copy_to_clipboard(path: &PathBuf) -> anyhow::Result<()> {
+    let mime_type = match path.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("ppm") | Some("pam") => "image/x-portable-pixmap",
+        _ => "image/png", // Default to PNG
+    };
+
+    // Try xclip first, then xsel
+    let result = std::process::Command::new("xclip")
+        .args(["-selection", "clipboard", "-t", mime_type, "-i"])
+        .arg(path)
+        .status();
+
+    match result {
+        Ok(status) if status.success() => {
+            tracing::debug!("Copied {} to clipboard via xclip", path.display());
+            Ok(())
+        }
+        _ => {
+            // Fallback to xsel (doesn't support MIME types as well)
+            let result = std::process::Command::new("xsel")
+                .args(["--clipboard", "--input"])
+                .stdin(std::fs::File::open(path)?)
+                .status();
+
+            match result {
+                Ok(status) if status.success() => {
+                    tracing::debug!("Copied {} to clipboard via xsel", path.display());
+                    Ok(())
+                }
+                Ok(status) => {
+                    tracing::warn!("xsel exited with status: {}", status);
+                    anyhow::bail!("Failed to copy to clipboard")
+                }
+                Err(e) => {
+                    tracing::warn!("Neither xclip nor xsel available: {}", e);
+                    anyhow::bail!("No clipboard tool available (install xclip or xsel)")
+                }
+            }
+        }
+    }
 }
 
 fn run_daemon() -> anyhow::Result<()> {
