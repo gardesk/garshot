@@ -1,6 +1,5 @@
 //! Daemon state machine.
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -10,7 +9,8 @@ use crate::capture::{
     blend_cursor, capture_active_window, capture_full_screen, capture_region, capture_window,
     get_cursor_image, Region,
 };
-use crate::encode::encode_png;
+use crate::config::{load_config, Config};
+use crate::encode::encode;
 use crate::selection::overlay::{interactive_selection, SelectionConfig};
 use crate::x11::{capture_monitor, get_monitors, Connection, ShmCapture};
 
@@ -18,8 +18,7 @@ use crate::x11::{capture_monitor, get_monitors, Connection, ShmCapture};
 pub struct DaemonState {
     conn: Connection,
     shm: ShmCapture,
-    save_dir: PathBuf,
-    format: String,
+    config: Config,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -30,15 +29,15 @@ impl DaemonState {
         let buffer_size = conn.width as usize * conn.height as usize * 4;
         let shm = ShmCapture::new(&conn, buffer_size)?;
 
-        let save_dir = dirs::picture_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Screenshots");
+        let config = load_config().unwrap_or_else(|e| {
+            tracing::warn!("Failed to load config: {}, using defaults", e);
+            Config::default()
+        });
 
         Ok(Self {
             conn,
             shm,
-            save_dir,
-            format: "png".to_string(),
+            config,
             shutdown: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -193,8 +192,8 @@ impl DaemonState {
             "running": true,
             "screen_width": self.conn.width,
             "screen_height": self.conn.height,
-            "save_dir": self.save_dir.display().to_string(),
-            "format": self.format,
+            "save_dir": self.config.general.save_dir.display().to_string(),
+            "format": self.config.general.format,
         });
         Response::ok_with_info(info)
     }
@@ -232,31 +231,34 @@ impl DaemonState {
     }
 
     fn save_capture(&self, data: &[u8], width: u32, height: u32, output: OutputMode) -> Response {
+        let format = &self.config.general.format;
+        let quality = self.config.general.quality;
+        let save_dir = &self.config.general.save_dir;
+
         match output {
             OutputMode::File | OutputMode::FileAndClipboard => {
                 let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-                let filename = format!("screenshot-{}.{}", timestamp, self.format);
-                let path = self.save_dir.join(&filename);
+                let filename = format!("screenshot-{}.{}", timestamp, format);
+                let path = save_dir.join(&filename);
 
                 // Ensure save directory exists
-                if let Err(e) = std::fs::create_dir_all(&self.save_dir) {
+                if let Err(e) = std::fs::create_dir_all(save_dir) {
                     return Response::error(format!("Failed to create save directory: {}", e));
                 }
 
-                match encode_png(data, width, height, &path) {
+                match encode(data, width, height, &path, format, quality) {
                     Ok(()) => {
                         tracing::info!("Saved {}x{} to {}", width, height, path.display());
                         Response::ok_with_path(path)
                     }
-                    Err(e) => Response::error(format!("Failed to encode PNG: {}", e)),
+                    Err(e) => Response::error(format!("Failed to encode {}: {}", format.to_uppercase(), e)),
                 }
             }
             OutputMode::Stdout => {
-                // Return base64-encoded PNG data
-                match crate::encode::encode_png_to_vec(data, width, height) {
-                    Ok(png_data) => {
+                match crate::encode::encode_to_vec(data, width, height, format, quality) {
+                    Ok(encoded_data) => {
                         use base64::Engine;
-                        let encoded = base64::engine::general_purpose::STANDARD.encode(&png_data);
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(&encoded_data);
                         Response {
                             success: true,
                             path: None,
@@ -265,7 +267,7 @@ impl DaemonState {
                             info: None,
                         }
                     }
-                    Err(e) => Response::error(format!("Failed to encode PNG: {}", e)),
+                    Err(e) => Response::error(format!("Failed to encode {}: {}", format.to_uppercase(), e)),
                 }
             }
             OutputMode::Clipboard => {
