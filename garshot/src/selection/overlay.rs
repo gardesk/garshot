@@ -79,6 +79,47 @@ pub fn interactive_selection(
     }
 }
 
+/// Put image data in chunks to avoid exceeding X11 max request size.
+fn put_image_chunked(
+    conn: &Connection,
+    drawable: u32,
+    gc: u32,
+    width: u16,
+    height: u16,
+    dst_x: i16,
+    dst_y: i16,
+    data: &[u8],
+) -> Result<()> {
+    let bytes_per_row = width as usize * 4;
+    let max_chunk_bytes = 65536; // 64KB conservative limit
+    let rows_per_chunk = (max_chunk_bytes / bytes_per_row).max(1);
+
+    let mut y = 0u16;
+    while (y as usize) < height as usize {
+        let chunk_height = ((height as usize - y as usize).min(rows_per_chunk)) as u16;
+        let start = y as usize * bytes_per_row;
+        let end = start + chunk_height as usize * bytes_per_row;
+        let chunk_data = &data[start..end];
+
+        conn.conn.put_image(
+            ImageFormat::Z_PIXMAP,
+            drawable,
+            gc,
+            width,
+            chunk_height,
+            dst_x,
+            dst_y + y as i16,
+            0,
+            conn.depth,
+            chunk_data,
+        )?;
+
+        y += chunk_height;
+    }
+
+    Ok(())
+}
+
 /// Overlay window state.
 struct Overlay {
     window: Window,
@@ -100,21 +141,9 @@ impl Overlay {
         // Create GC on pixmap first (needed for put_image)
         conn.conn.create_gc(gc, pixmap, &CreateGCAux::new())?;
 
-        // Put blurred image data into pixmap
-        // Convert RGBA to native format (BGRA for X11)
+        // Put blurred image data into pixmap in chunks to avoid exceeding max request size
         let bgra_data = rgba_to_bgra(blurred_data);
-        conn.conn.put_image(
-            ImageFormat::Z_PIXMAP,
-            pixmap,
-            gc,
-            width,
-            height,
-            0,
-            0,
-            0,
-            conn.depth,
-            &bgra_data,
-        )?;
+        put_image_chunked(conn, pixmap, gc, width, height, 0, 0, &bgra_data)?;
 
         // Create fullscreen overlay window
         conn.conn.create_window(
@@ -207,20 +236,9 @@ impl Overlay {
     }
 
     fn draw(&self, conn: &Connection, region: Option<&Region>, original: &[u8], blurred: &[u8], config: &SelectionConfig) -> Result<()> {
-        // Redraw blurred background
+        // Redraw blurred background in chunks
         let bgra_blurred = rgba_to_bgra(blurred);
-        conn.conn.put_image(
-            ImageFormat::Z_PIXMAP,
-            self.window,
-            self.gc,
-            self.width,
-            self.height,
-            0,
-            0,
-            0,
-            conn.depth,
-            &bgra_blurred,
-        )?;
+        put_image_chunked(conn, self.window, self.gc, self.width, self.height, 0, 0, &bgra_blurred)?;
 
         if let Some(region) = region {
             if region.width > 0 && region.height > 0 {
@@ -228,18 +246,7 @@ impl Overlay {
                 let clear_data = extract_region(original, self.width as usize, region);
                 let bgra_clear = rgba_to_bgra(&clear_data);
 
-                conn.conn.put_image(
-                    ImageFormat::Z_PIXMAP,
-                    self.window,
-                    self.gc,
-                    region.width,
-                    region.height,
-                    region.x,
-                    region.y,
-                    0,
-                    conn.depth,
-                    &bgra_clear,
-                )?;
+                put_image_chunked(conn, self.window, self.gc, region.width, region.height, region.x, region.y, &bgra_clear)?;
 
                 // Draw selection border
                 conn.conn.change_gc(
