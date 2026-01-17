@@ -58,3 +58,6 @@ base64 = { workspace = true }
 
 # IPC
 garshot-ipc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

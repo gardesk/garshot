@@ -20,6 +20,7 @@
 //! - `garshot-ipc`: Shared IPC protocol types
 
 pub mod capture;
+pub mod config;
 pub mod daemon;
 pub mod encode;
 pub mod error;

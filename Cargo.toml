@@ -49,5 +49,8 @@ dirs = "6"
 # Encoding
 base64 = "0.22"
 
+# Testing
+tempfile = "3"
+
 # IPC (internal)
 garshot-ipc = { path = "garshot-ipc" }
