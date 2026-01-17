@@ -1,0 +1,57 @@
+[package]
+name = "garshot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Screenshot utility for the gar desktop suite"
+
+[[bin]]
+name = "garshot"
+path = "src/main.rs"
+
+[lib]
+name = "garshot"
+path = "src/lib.rs"
+
+[dependencies]
+# X11
+x11rb = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Image encoding
+png = { workspace = true }
+image = { workspace = true }
+
+# Configuration
+mlua = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Graphics
+cairo-rs = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Directories
+dirs = { workspace = true }
+
+# System
+libc = "0.2"
+
+# IPC
+garshot-ipc = { workspace = true }
