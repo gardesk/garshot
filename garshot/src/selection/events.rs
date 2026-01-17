@@ -70,6 +70,26 @@ impl SelectionHandler {
         }
     }
 
+    /// Get the current selection region.
+    pub fn current_region(&self) -> Option<Region> {
+        self.state.current_region()
+    }
+
+    /// Handle any X11 event and return a result if the selection is complete.
+    pub fn handle_event(&mut self, event: &x11rb::protocol::Event) -> Option<SelectionResult> {
+        use x11rb::protocol::Event;
+        match event {
+            Event::ButtonPress(e) => self.handle_button_press(e),
+            Event::ButtonRelease(e) => self.handle_button_release(e),
+            Event::MotionNotify(e) => {
+                self.handle_motion(e);
+                None
+            }
+            Event::KeyPress(e) => self.handle_key_press(e),
+            _ => None,
+        }
+    }
+
     /// Handle a button press event.
     pub fn handle_button_press(&mut self, event: &ButtonPressEvent) -> Option<SelectionResult> {
         match event.detail {

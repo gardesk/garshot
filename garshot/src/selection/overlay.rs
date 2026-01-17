@@ -1,14 +1,23 @@
-//! Fullscreen overlay window for interactive selection.
+//! Selection overlay for interactive region capture.
+//!
+//! Creates a fullscreen overlay with a blurred background. The user can drag
+//! to select a region, which shows the unblurred original image.
 
 use x11rb::connection::Connection as X11Connection;
-use x11rb::protocol::xproto::*;
-use x11rb::COPY_DEPTH_FROM_PARENT;
+use x11rb::protocol::xproto::{
+    ChangeGCAux, ConnectionExt, CreateGCAux, CreateWindowAux, Cursor,
+    EventMask, Font, Gcontext, GrabMode, GrabStatus, ImageFormat, Pixmap, Rectangle,
+    Window, WindowClass,
+};
 
-use crate::capture::{capture_full_screen, Region};
+use super::blur::blur_rgba;
+use super::events::{SelectionHandler, SelectionResult};
+use crate::capture::Region;
 use crate::error::Result;
-use crate::selection::blur::blur_rgba;
-use crate::selection::events::{SelectionHandler, SelectionResult, SelectionState};
 use crate::x11::{Connection, ShmCapture};
+
+/// X11 constant for copying depth from parent.
+const COPY_DEPTH_FROM_PARENT: u8 = 0;
 
 /// Configuration for the selection overlay.
 #[derive(Debug, Clone)]
@@ -31,12 +40,7 @@ impl Default for SelectionConfig {
     }
 }
 
-/// Perform interactive region selection.
-///
-/// Creates a fullscreen overlay with blurred background, allowing the user
-/// to select a region by clicking and dragging.
-///
-/// Returns the selected region, or None if cancelled.
+/// Run interactive selection and return the selected region.
 pub fn interactive_selection(
     conn: &Connection,
     shm: &ShmCapture,
@@ -44,25 +48,25 @@ pub fn interactive_selection(
 ) -> Result<Option<Region>> {
     tracing::debug!("Starting interactive selection");
 
-    // 1. Capture current screen
-    let capture = capture_full_screen(conn, shm)?;
-    let width = capture.width as usize;
-    let height = capture.height as usize;
+    let width = conn.width as usize;
+    let height = conn.height as usize;
 
-    // Keep original for the clear region
-    let original_data = capture.data.clone();
+    // 1. Capture current screen
+    let capture_data = shm.capture(conn, 0, 0, conn.width, conn.height)?;
+    // Convert BGRA to RGBA and copy to owned buffer
+    let original_data = crate::x11::shm::bgra_to_rgba(capture_data);
 
     // 2. Apply blur for overlay background
-    let mut blurred_data = capture.data;
+    let mut blurred_data = original_data.clone();
     tracing::debug!("Applying blur with radius {}", config.blur_radius);
     blur_rgba(&mut blurred_data, width, height, config.blur_radius);
 
-    // 3. Create overlay window
-    let overlay = Overlay::new(conn, &blurred_data, width as u16, height as u16)?;
+    // 3. Create overlay with server-side pixmaps (fast!)
+    let overlay = Overlay::new(conn, &original_data, &blurred_data, conn.width, conn.height)?;
     overlay.show(conn)?;
 
     // 4. Event loop
-    let result = run_event_loop(conn, &overlay, &original_data, &blurred_data, config)?;
+    let result = run_event_loop(conn, &overlay, config)?;
 
     // 5. Cleanup
     overlay.hide(conn)?;
@@ -79,6 +83,15 @@ pub fn interactive_selection(
     }
 }
 
+/// Convert RGBA to BGRA (X11 native format).
+fn rgba_to_bgra(data: &[u8]) -> Vec<u8> {
+    let mut bgra = data.to_vec();
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2); // Swap R and B
+    }
+    bgra
+}
+
 /// Put image data in chunks to avoid exceeding X11 max request size.
 fn put_image_chunked(
     conn: &Connection,
@@ -91,7 +104,7 @@ fn put_image_chunked(
     data: &[u8],
 ) -> Result<()> {
     let bytes_per_row = width as usize * 4;
-    let max_chunk_bytes = 65536; // 64KB conservative limit
+    let max_chunk_bytes = 65536;
     let rows_per_chunk = (max_chunk_bytes / bytes_per_row).max(1);
 
     let mut y = 0u16;
@@ -120,32 +133,49 @@ fn put_image_chunked(
     Ok(())
 }
 
-/// Overlay window state.
+/// Overlay window state with server-side pixmaps for fast drawing.
 struct Overlay {
     window: Window,
     gc: Gcontext,
-    pixmap: Pixmap,
+    original_pixmap: Pixmap,  // Unblurred screen
+    blurred_pixmap: Pixmap,   // Blurred screen
+    cursor: Cursor,
     width: u16,
     height: u16,
 }
 
 impl Overlay {
-    fn new(conn: &Connection, blurred_data: &[u8], width: u16, height: u16) -> Result<Self> {
+    fn new(
+        conn: &Connection,
+        original_data: &[u8],
+        blurred_data: &[u8],
+        width: u16,
+        height: u16,
+    ) -> Result<Self> {
         let window = conn.conn.generate_id()?;
         let gc = conn.conn.generate_id()?;
-        let pixmap = conn.conn.generate_id()?;
+        let original_pixmap = conn.conn.generate_id()?;
+        let blurred_pixmap = conn.conn.generate_id()?;
 
-        // Create pixmap for blurred background
-        conn.conn.create_pixmap(conn.depth, pixmap, conn.root, width, height)?;
+        // Create pixmaps
+        conn.conn.create_pixmap(conn.depth, original_pixmap, conn.root, width, height)?;
+        conn.conn.create_pixmap(conn.depth, blurred_pixmap, conn.root, width, height)?;
 
-        // Create GC on pixmap first (needed for put_image)
-        conn.conn.create_gc(gc, pixmap, &CreateGCAux::new())?;
+        // Create GC
+        conn.conn.create_gc(gc, original_pixmap, &CreateGCAux::new())?;
 
-        // Put blurred image data into pixmap in chunks to avoid exceeding max request size
-        let bgra_data = rgba_to_bgra(blurred_data);
-        put_image_chunked(conn, pixmap, gc, width, height, 0, 0, &bgra_data)?;
+        // Upload original image to pixmap (one-time cost)
+        let bgra_original = rgba_to_bgra(original_data);
+        put_image_chunked(conn, original_pixmap, gc, width, height, 0, 0, &bgra_original)?;
 
-        // Create fullscreen overlay window
+        // Upload blurred image to pixmap (one-time cost)
+        let bgra_blurred = rgba_to_bgra(blurred_data);
+        put_image_chunked(conn, blurred_pixmap, gc, width, height, 0, 0, &bgra_blurred)?;
+
+        // Create crosshair cursor
+        let cursor = create_crosshair_cursor(conn)?;
+
+        // Create fullscreen overlay window with blurred background
         conn.conn.create_window(
             COPY_DEPTH_FROM_PARENT,
             window,
@@ -159,14 +189,15 @@ impl Overlay {
             0,
             &CreateWindowAux::new()
                 .override_redirect(1)
-                .background_pixmap(pixmap)
+                .background_pixmap(blurred_pixmap)
                 .event_mask(
                     EventMask::EXPOSURE
                         | EventMask::BUTTON_PRESS
                         | EventMask::BUTTON_RELEASE
                         | EventMask::POINTER_MOTION
                         | EventMask::KEY_PRESS,
-                ),
+                )
+                .cursor(cursor),
         )?;
 
         conn.conn.flush()?;
@@ -174,7 +205,9 @@ impl Overlay {
         Ok(Self {
             window,
             gc,
-            pixmap,
+            original_pixmap,
+            blurred_pixmap,
+            cursor,
             width,
             height,
         })
@@ -183,7 +216,7 @@ impl Overlay {
     fn show(&self, conn: &Connection) -> Result<()> {
         conn.conn.map_window(self.window)?;
 
-        // Grab pointer
+        // Grab pointer with crosshair cursor
         let grab_result = conn
             .conn
             .grab_pointer(
@@ -195,7 +228,7 @@ impl Overlay {
                 GrabMode::ASYNC,
                 GrabMode::ASYNC,
                 self.window,
-                x11rb::NONE,
+                self.cursor,
                 x11rb::CURRENT_TIME,
             )?
             .reply()?;
@@ -228,25 +261,42 @@ impl Overlay {
         conn.conn.ungrab_pointer(x11rb::CURRENT_TIME)?;
         conn.conn.ungrab_keyboard(x11rb::CURRENT_TIME)?;
         conn.conn.unmap_window(self.window)?;
-        conn.conn.free_pixmap(self.pixmap)?;
+        conn.conn.free_pixmap(self.original_pixmap)?;
+        conn.conn.free_pixmap(self.blurred_pixmap)?;
         conn.conn.free_gc(self.gc)?;
+        conn.conn.free_cursor(self.cursor)?;
         conn.conn.destroy_window(self.window)?;
         conn.conn.flush()?;
         Ok(())
     }
 
-    fn draw(&self, conn: &Connection, region: Option<&Region>, original: &[u8], blurred: &[u8], config: &SelectionConfig) -> Result<()> {
-        // Redraw blurred background in chunks
-        let bgra_blurred = rgba_to_bgra(blurred);
-        put_image_chunked(conn, self.window, self.gc, self.width, self.height, 0, 0, &bgra_blurred)?;
+    /// Fast redraw using server-side CopyArea (no CPU work, no data transfer).
+    fn draw(&self, conn: &Connection, region: Option<&Region>, config: &SelectionConfig) -> Result<()> {
+        // Copy entire blurred pixmap to window (single X11 request!)
+        conn.conn.copy_area(
+            self.blurred_pixmap,
+            self.window,
+            self.gc,
+            0, 0,
+            0, 0,
+            self.width,
+            self.height,
+        )?;
 
         if let Some(region) = region {
             if region.width > 0 && region.height > 0 {
-                // Draw clear (unblurred) region
-                let clear_data = extract_region(original, self.width as usize, region);
-                let bgra_clear = rgba_to_bgra(&clear_data);
-
-                put_image_chunked(conn, self.window, self.gc, region.width, region.height, region.x, region.y, &bgra_clear)?;
+                // Copy selection region from original pixmap (single X11 request!)
+                conn.conn.copy_area(
+                    self.original_pixmap,
+                    self.window,
+                    self.gc,
+                    region.x,
+                    region.y,
+                    region.x,
+                    region.y,
+                    region.width,
+                    region.height,
+                )?;
 
                 // Draw selection border
                 conn.conn.change_gc(
@@ -272,19 +322,18 @@ impl Overlay {
                 let text_x = region.x + 5;
                 let text_y = region.y + region.height as i16 - 5;
 
-                // Draw text background for readability
+                // Draw text background
                 conn.conn.change_gc(
                     self.gc,
                     &ChangeGCAux::new().foreground(0x000000),
                 )?;
-
                 conn.conn.image_text8(self.window, self.gc, text_x + 1, text_y + 1, text.as_bytes())?;
 
+                // Draw text foreground
                 conn.conn.change_gc(
                     self.gc,
                     &ChangeGCAux::new().foreground(0xFFFFFF),
                 )?;
-
                 conn.conn.image_text8(self.window, self.gc, text_x, text_y, text.as_bytes())?;
             }
         }
@@ -294,73 +343,50 @@ impl Overlay {
     }
 }
 
-/// Run the selection event loop.
+/// Create a crosshair cursor.
+fn create_crosshair_cursor(conn: &Connection) -> Result<Cursor> {
+    // Use the standard cursor font
+    let font: Font = conn.conn.generate_id()?;
+    conn.conn.open_font(font, b"cursor")?;
+
+    let cursor: Cursor = conn.conn.generate_id()?;
+    // 34 is the crosshair glyph in the cursor font
+    conn.conn.create_glyph_cursor(
+        cursor,
+        font,
+        font,
+        34,     // Source char (crosshair)
+        35,     // Mask char
+        0xFFFF, 0xFFFF, 0xFFFF, // Foreground RGB (white)
+        0, 0, 0,               // Background RGB (black)
+    )?;
+
+    conn.conn.close_font(font)?;
+
+    Ok(cursor)
+}
+
+/// Run the event loop for selection.
 fn run_event_loop(
     conn: &Connection,
     overlay: &Overlay,
-    original: &[u8],
-    blurred: &[u8],
     config: &SelectionConfig,
 ) -> Result<SelectionResult> {
     let mut handler = SelectionHandler::new();
-
-    // Initial draw
-    overlay.draw(conn, None, original, blurred, config)?;
+    let mut last_region: Option<Region> = None;
 
     loop {
         let event = conn.conn.wait_for_event()?;
 
-        let result = match event {
-            x11rb::protocol::Event::ButtonPress(e) => handler.handle_button_press(&e),
-            x11rb::protocol::Event::ButtonRelease(e) => handler.handle_button_release(&e),
-            x11rb::protocol::Event::MotionNotify(e) => {
-                handler.handle_motion(&e);
-                None
-            }
-            x11rb::protocol::Event::KeyPress(e) => handler.handle_key_press(&e),
-            x11rb::protocol::Event::Expose(_) => {
-                overlay.draw(conn, handler.state().current_region().as_ref(), original, blurred, config)?;
-                None
-            }
-            _ => None,
-        };
-
-        // Redraw on motion
-        if matches!(handler.state(), SelectionState::Dragging { .. }) {
-            overlay.draw(conn, handler.state().current_region().as_ref(), original, blurred, config)?;
-        }
-
-        if let Some(result) = result {
+        if let Some(result) = handler.handle_event(&event) {
             return Ok(result);
         }
-    }
-}
 
-/// Convert RGBA to BGRA (X11 native format).
-fn rgba_to_bgra(data: &[u8]) -> Vec<u8> {
-    let mut bgra = Vec::with_capacity(data.len());
-    for chunk in data.chunks_exact(4) {
-        bgra.push(chunk[2]); // B
-        bgra.push(chunk[1]); // G
-        bgra.push(chunk[0]); // R
-        bgra.push(chunk[3]); // A
-    }
-    bgra
-}
-
-/// Extract a region from image data.
-fn extract_region(data: &[u8], image_width: usize, region: &Region) -> Vec<u8> {
-    let mut result = Vec::with_capacity(region.width as usize * region.height as usize * 4);
-
-    for y in 0..region.height as usize {
-        let src_y = region.y as usize + y;
-        let src_offset = (src_y * image_width + region.x as usize) * 4;
-        let src_end = src_offset + region.width as usize * 4;
-
-        if src_end <= data.len() {
-            result.extend_from_slice(&data[src_offset..src_end]);
+        // Only redraw if the region changed (reduces unnecessary draws)
+        let current_region = handler.current_region();
+        if current_region != last_region {
+            overlay.draw(conn, current_region.as_ref(), config)?;
+            last_region = current_region;
         }
     }
-
-    result
 }
