@@ -97,6 +97,9 @@ impl Overlay {
         // Create pixmap for blurred background
         conn.conn.create_pixmap(conn.depth, pixmap, conn.root, width, height)?;
 
+        // Create GC on pixmap first (needed for put_image)
+        conn.conn.create_gc(gc, pixmap, &CreateGCAux::new())?;
+
         // Put blurred image data into pixmap
         // Convert RGBA to native format (BGRA for X11)
         let bgra_data = rgba_to_bgra(blurred_data);
@@ -136,9 +139,6 @@ impl Overlay {
                         | EventMask::KEY_PRESS,
                 ),
         )?;
-
-        // Create GC for drawing
-        conn.conn.create_gc(gc, window, &CreateGCAux::new())?;
 
         conn.conn.flush()?;
 
