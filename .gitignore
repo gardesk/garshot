@@ -1,4 +1,5 @@
 .fackr/
 .vscode
-docs/
+docs/sprints/
 CLAUDE.md
+target/
