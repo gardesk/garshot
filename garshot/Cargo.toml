@@ -59,5 +59,10 @@ base64 = { workspace = true }
 # IPC
 garshot-ipc = { workspace = true }
 
+# gartk (shared toolkit for annotation)
+gartk-core = { workspace = true }
+gartk-render = { workspace = true }
+gartk-x11 = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
