@@ -19,6 +19,7 @@
 //! - `garshotctl` (CLI): Control tool for sending commands to the daemon
 //! - `garshot-ipc`: Shared IPC protocol types
 
+pub mod annotate;
 pub mod capture;
 pub mod config;
 pub mod daemon;
