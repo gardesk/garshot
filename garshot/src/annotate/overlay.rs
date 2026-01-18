@@ -195,9 +195,8 @@ impl AnnotationOverlay {
         // Map window (gar will manage it as a floating dialog)
         self.window.map()?;
 
-        // Grab keyboard for our shortcuts (Escape, Ctrl+Enter, tool keys, etc.)
-        // Don't grab pointer - let gar handle mod+drag for window movement
-        self.window.grab_keyboard_with_retry(10, 50)?;
+        // Focus window for keyboard input (no grab - allows WM keybinds to work)
+        self.window.focus()?;
 
         // Set initial cursor
         self.update_cursor()?;
@@ -241,9 +240,6 @@ impl AnnotationOverlay {
                 break;
             }
         }
-
-        // Cleanup
-        self.window.ungrab_keyboard()?;
 
         // Return result
         Ok(self.state.take_result().unwrap_or(AnnotationResult::Cancel))
@@ -629,14 +625,11 @@ impl AnnotationOverlay {
     fn run_eyedropper(&mut self) -> Result<Option<gartk_core::Color>> {
         use crate::annotate::ui::color_picker::eyedropper::{Eyedropper, EyedropperResult};
 
-        // Temporarily release our keyboard grab so eyedropper can grab
-        self.window.ungrab_keyboard()?;
-
         let eyedropper = Eyedropper::new()?;
         let result = eyedropper.run()?;
 
-        // Regrab keyboard for our window
-        self.window.grab_keyboard_with_retry(10, 50)?;
+        // Restore focus to our window after eyedropper closes
+        self.window.focus()?;
 
         match result {
             EyedropperResult::Color(color) => Ok(Some(color)),
