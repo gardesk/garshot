@@ -65,11 +65,11 @@ impl Toolbar {
     pub fn draw(&self, surface: &Surface) -> anyhow::Result<()> {
         let ctx = surface.context()?;
 
-        // Draw background
+        // Draw background (fully opaque to avoid artifacts on reused surface)
         fill_rect(
             &ctx,
             self.rect,
-            Color::new(0.15, 0.15, 0.15, 0.95),
+            Color::new(0.15, 0.15, 0.15, 1.0),
         );
 
         // Draw tool buttons
