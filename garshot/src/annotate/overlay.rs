@@ -9,10 +9,14 @@ use crate::annotate::tools::{self, Tool};
 use crate::annotate::ui::{Toolbar, TOOLBAR_HEIGHT};
 
 use gartk_core::{InputEvent, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, Point};
+use gartk_render::Surface;
 use gartk_x11::{Connection, CursorManager, Window, WindowConfig};
 use x11rb::connection::Connection as X11Connection;
-use x11rb::protocol::xproto::{self, AtomEnum, ConnectionExt, PropMode};
+use x11rb::protocol::xproto::{self, AtomEnum, ConnectionExt, ImageFormat, PropMode};
 use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
+
+/// Maximum bytes per put_image request (conservative, below typical 256KB limit).
+const MAX_PUT_IMAGE_BYTES: usize = 65536;
 
 /// Annotation overlay for editing screenshots.
 pub struct AnnotationOverlay {
@@ -32,6 +36,8 @@ pub struct AnnotationOverlay {
     history: History,
     /// Toolbar UI.
     toolbar: Toolbar,
+    /// Toolbar surface (reused to avoid allocation each frame).
+    toolbar_surface: Surface,
     /// Cursor manager.
     cursor_manager: CursorManager,
     /// Whether a redraw is needed.
@@ -48,12 +54,16 @@ impl AnnotationOverlay {
     /// * `width` - Image width
     /// * `height` - Image height
     pub fn new(image_data: &[u8], width: u32, height: u32) -> Result<Self> {
+        tracing::debug!("Creating annotation overlay for image {}x{}", width, height);
+
         // Connect to X11
         let conn = Connection::connect(None).context("Failed to connect to X11")?;
 
         // Window size = image size + toolbar height
         let window_width = width;
         let window_height = height + TOOLBAR_HEIGHT;
+        tracing::debug!("Window size will be {}x{} (including {}px toolbar)",
+            window_width, window_height, TOOLBAR_HEIGHT);
 
         // Center window on screen
         let screen_width = conn.screen_width();
@@ -70,6 +80,8 @@ impl AnnotationOverlay {
             .map_on_create(false);
 
         let window = Window::create(conn.clone(), config).context("Failed to create window")?;
+        tracing::debug!("Created window {} at position ({}, {})",
+            window.id(), pos_x.max(0), pos_y.max(0));
 
         // Set window type to DIALOG so gar floats it automatically
         let window_type_atom = conn.inner()
@@ -109,6 +121,47 @@ impl AnnotationOverlay {
         // Create initial tool
         let tool = tools::create_tool(ToolType::Arrow);
 
+        // Create reusable toolbar surface
+        let toolbar_surface = Surface::new(width, TOOLBAR_HEIGHT)
+            .context("Failed to create toolbar surface")?;
+
+        // Set WM_NORMAL_HINTS to lock window size (prevents WM from resizing)
+        // Flags: PMinSize (16) | PMaxSize (32) | PSize (8) = 56
+        let size_hints: [u32; 18] = [
+            56,                      // flags: PSize | PMinSize | PMaxSize
+            0, 0,                    // x, y (obsolete)
+            window_width, window_height,  // width, height (PSize)
+            window_width, window_height,  // min_width, min_height (PMinSize)
+            window_width, window_height,  // max_width, max_height (PMaxSize)
+            0, 0,                    // width_inc, height_inc
+            0, 0,                    // min_aspect_num, min_aspect_den
+            0, 0,                    // max_aspect_num, max_aspect_den
+            0, 0,                    // base_width, base_height
+            0,                       // win_gravity
+        ];
+        conn.inner().change_property32(
+            PropMode::REPLACE,
+            window.id(),
+            AtomEnum::WM_NORMAL_HINTS,
+            AtomEnum::WM_SIZE_HINTS,
+            &size_hints,
+        )?;
+        tracing::debug!("Set WM_NORMAL_HINTS: min/max {}x{}", window_width, window_height);
+
+        // Tell compositor to bypass this window (reduces effects/lag from picom)
+        let bypass_atom = conn.inner()
+            .intern_atom(false, b"_NET_WM_BYPASS_COMPOSITOR")?
+            .reply()
+            .context("Failed to intern bypass atom")?
+            .atom;
+        conn.inner().change_property32(
+            PropMode::REPLACE,
+            window.id(),
+            bypass_atom,
+            AtomEnum::CARDINAL,
+            &[1], // 1 = bypass compositor
+        )?;
+
         Ok(Self {
             conn,
             window,
@@ -118,6 +171,7 @@ impl AnnotationOverlay {
             tool,
             history: History::new(),
             toolbar,
+            toolbar_surface,
             cursor_manager,
             needs_redraw: true,
             image_offset_y: TOOLBAR_HEIGHT as i32,
@@ -144,16 +198,33 @@ impl AnnotationOverlay {
 
         // Event loop
         loop {
-            // Wait for event
+            // Wait for first event
             let event = self.conn.inner().wait_for_event()?;
+            let mut needs_redraw = false;
 
-            // Translate to InputEvent
+            // Translate and handle the first event
             if let Some(input_event) = self.translate_event(&event) {
-                let needs_redraw = self.handle_event(input_event)?;
+                needs_redraw |= self.handle_event(input_event)?;
+            }
 
-                if needs_redraw {
-                    self.redraw()?;
+            // Check if finished after first event
+            if self.state.is_finished() {
+                break;
+            }
+
+            // Process all pending events before redrawing (batching)
+            while let Some(event) = self.conn.inner().poll_for_event()? {
+                if let Some(input_event) = self.translate_event(&event) {
+                    needs_redraw |= self.handle_event(input_event)?;
                 }
+                if self.state.is_finished() {
+                    break;
+                }
+            }
+
+            // Single redraw for all batched events
+            if needs_redraw {
+                self.redraw()?;
             }
 
             // Check if finished
@@ -491,21 +562,16 @@ impl AnnotationOverlay {
         let width = self.canvas.width();
         let height = self.canvas.height();
 
-        // Create toolbar surface and draw toolbar
-        let toolbar_surface = gartk_render::Surface::new(width, TOOLBAR_HEIGHT)?;
-        self.toolbar.draw(&toolbar_surface)?;
+        // Draw toolbar to reusable surface
+        self.toolbar.draw(&self.toolbar_surface)?;
 
         // Get toolbar data and convert to BGRA
-        let mut toolbar_surface = toolbar_surface;
-        let toolbar_data = toolbar_surface.to_rgba()?;
-        let mut toolbar_bgra: Vec<u8> = toolbar_data;
-        for chunk in toolbar_bgra.chunks_exact_mut(4) {
-            chunk.swap(0, 2);
-        }
+        let toolbar_data = self.toolbar_surface.to_rgba()?;
+        let toolbar_bgra = rgba_to_bgra(&toolbar_data);
 
-        // Blit toolbar at y=0
+        // Blit toolbar at y=0 (toolbar is small, no chunking needed)
         self.conn.inner().put_image(
-            xproto::ImageFormat::Z_PIXMAP,
+            ImageFormat::Z_PIXMAP,
             self.window.id(),
             self.gc,
             width as u16,
@@ -520,22 +586,17 @@ impl AnnotationOverlay {
         // Get image composite data
         let surface = self.canvas.composite_surface_mut();
         let data = surface.to_rgba()?;
-        let mut bgra: Vec<u8> = data;
-        for chunk in bgra.chunks_exact_mut(4) {
-            chunk.swap(0, 2);
-        }
+        let bgra = rgba_to_bgra(&data);
 
-        // Blit image at y=TOOLBAR_HEIGHT
-        self.conn.inner().put_image(
-            xproto::ImageFormat::Z_PIXMAP,
+        // Blit image at y=TOOLBAR_HEIGHT using chunked put_image for large images
+        put_image_chunked(
+            self.conn.inner(),
             self.window.id(),
             self.gc,
             width as u16,
             height as u16,
             0,
             self.image_offset_y as i16,
-            0,
-            24,
             &bgra,
         )?;
 
@@ -567,4 +628,53 @@ impl AnnotationOverlay {
         self.conn.inner().flush()?;
         Ok(())
     }
+}
+
+/// Convert RGBA to BGRA (X11 native format).
+fn rgba_to_bgra(data: &[u8]) -> Vec<u8> {
+    let mut bgra = data.to_vec();
+    for chunk in bgra.chunks_exact_mut(4) {
+        chunk.swap(0, 2); // Swap R and B
+    }
+    bgra
+}
+
+/// Put image data in chunks to avoid exceeding X11 max request size.
+fn put_image_chunked<C: X11Connection>(
+    conn: &C,
+    drawable: u32,
+    gc: u32,
+    width: u16,
+    height: u16,
+    dst_x: i16,
+    dst_y: i16,
+    data: &[u8],
+) -> Result<()> {
+    let bytes_per_row = width as usize * 4;
+    let rows_per_chunk = (MAX_PUT_IMAGE_BYTES / bytes_per_row).max(1);
+
+    let mut y = 0u16;
+    while (y as usize) < height as usize {
+        let chunk_height = ((height as usize - y as usize).min(rows_per_chunk)) as u16;
+        let start = y as usize * bytes_per_row;
+        let end = start + chunk_height as usize * bytes_per_row;
+        let chunk_data = &data[start..end];
+
+        conn.put_image(
+            ImageFormat::Z_PIXMAP,
+            drawable,
+            gc,
+            width,
+            chunk_height,
+            dst_x,
+            dst_y + y as i16,
+            0,
+            24,
+            chunk_data,
+        )?;
+
+        y += chunk_height;
+    }
+
+    Ok(())
 }
