@@ -9,6 +9,17 @@ use gartk_render::{
 /// Toolbar height in pixels.
 pub const TOOLBAR_HEIGHT: u32 = 48;
 
+/// Result of a toolbar click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolbarClickResult {
+    /// A tool button was clicked.
+    Tool(ToolType),
+    /// The color preview was clicked (open color picker).
+    ColorPreview,
+    /// Click was in toolbar area but not on any button.
+    None,
+}
+
 /// Toolbar for selecting annotation tools.
 pub struct Toolbar {
     /// Toolbar bounds.
@@ -61,6 +72,16 @@ impl Toolbar {
         Rect::new(x, y, Self::BUTTON_WIDTH, TOOLBAR_HEIGHT - Self::PADDING * 2)
     }
 
+    /// Calculate the color preview rect.
+    pub fn color_preview_rect(&self) -> Rect {
+        Rect::new(
+            (ToolType::all().len() as i32 + 1) * (Self::BUTTON_WIDTH as i32 + Self::PADDING as i32),
+            Self::PADDING as i32 + 4,
+            32,
+            32,
+        )
+    }
+
     /// Draw the toolbar onto a surface.
     pub fn draw(&self, surface: &Surface) -> anyhow::Result<()> {
         let ctx = surface.context()?;
@@ -102,12 +123,7 @@ impl Toolbar {
         }
 
         // Draw color preview
-        let color_rect = Rect::new(
-            (ToolType::all().len() as i32 + 1) * (Self::BUTTON_WIDTH as i32 + Self::PADDING as i32),
-            Self::PADDING as i32 + 4,
-            32,
-            32,
-        );
+        let color_rect = self.color_preview_rect();
         fill_rounded_rect(&ctx, color_rect, 4.0, self.current_color);
         stroke_rounded_rect(
             &ctx,
@@ -136,19 +152,25 @@ impl Toolbar {
         Ok(())
     }
 
-    /// Handle click on toolbar, returns selected tool if a button was clicked.
-    pub fn handle_click(&self, pos: Point) -> Option<ToolType> {
+    /// Handle click on toolbar, returns the click result.
+    pub fn handle_click(&self, pos: Point) -> ToolbarClickResult {
         if !self.rect.contains_point(pos) {
-            return None;
+            return ToolbarClickResult::None;
         }
 
+        // Check tool buttons
         for (i, tool) in ToolType::all().iter().enumerate() {
             let btn_rect = self.button_rect(i);
             if btn_rect.contains_point(pos) {
-                return Some(*tool);
+                return ToolbarClickResult::Tool(*tool);
             }
         }
 
-        None
+        // Check color preview
+        if self.color_preview_rect().contains_point(pos) {
+            return ToolbarClickResult::ColorPreview;
+        }
+
+        ToolbarClickResult::None
     }
 }
