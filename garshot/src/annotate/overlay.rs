@@ -195,14 +195,22 @@ impl AnnotationOverlay {
         // Map window (gar will manage it as a floating dialog)
         self.window.map()?;
 
-        // Focus window for keyboard input (no grab - allows WM keybinds to work)
+        // Flush and sync to ensure window is mapped before we try to draw
+        self.conn.inner().flush()?;
+        self.conn.inner().sync()?;
+
+        // Focus and raise window for keyboard input (no grab - allows WM keybinds to work)
         self.window.focus()?;
+        self.window.raise()?;
 
         // Set initial cursor
         self.update_cursor()?;
 
         // Initial draw
         self.redraw()?;
+
+        // Flush to ensure initial draw is visible
+        self.conn.inner().flush()?;
 
         // Event loop
         loop {
@@ -499,6 +507,11 @@ impl AnnotationOverlay {
                         }
                     }
                 }
+            }
+
+            // Handle expose events (window needs redraw)
+            InputEvent::Expose => {
+                return Ok(true);
             }
 
             _ => {}
