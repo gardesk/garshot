@@ -54,3 +54,8 @@ tempfile = "3"
 
 # IPC (internal)
 garshot-ipc = { path = "garshot-ipc" }
+
+# gartk (shared toolkit)
+gartk-core = { path = "../gartk/gartk-core" }
+gartk-render = { path = "../gartk/gartk-render" }
+gartk-x11 = { path = "../gartk/gartk-x11" }
