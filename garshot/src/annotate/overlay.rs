@@ -6,7 +6,10 @@ use crate::annotate::canvas::AnnotationCanvas;
 use crate::annotate::history::{History, Snapshot};
 use crate::annotate::state::{AnnotationResult, AnnotationState, ToolType};
 use crate::annotate::tools::{self, Tool};
-use crate::annotate::ui::{Toolbar, TOOLBAR_HEIGHT};
+use crate::annotate::ui::{
+    color_picker::{ColorPicker, ColorPickerResult},
+    Toolbar, ToolbarClickResult, TOOLBAR_HEIGHT,
+};
 
 use gartk_core::{InputEvent, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, Point};
 use gartk_render::Surface;
@@ -44,6 +47,10 @@ pub struct AnnotationOverlay {
     needs_redraw: bool,
     /// Image offset from top (for toolbar).
     image_offset_y: i32,
+    /// Color picker dialog (when open).
+    color_picker: Option<ColorPicker>,
+    /// Color picker surface (reused to avoid allocation).
+    color_picker_surface: Option<Surface>,
 }
 
 impl AnnotationOverlay {
@@ -175,6 +182,8 @@ impl AnnotationOverlay {
             cursor_manager,
             needs_redraw: true,
             image_offset_y: TOOLBAR_HEIGHT as i32,
+            color_picker: None,
+            color_picker_surface: None,
         })
     }
 
@@ -367,14 +376,65 @@ impl AnnotationOverlay {
     fn handle_event(&mut self, event: InputEvent) -> Result<bool> {
         let mut needs_redraw = false;
 
+        // If color picker is open, route events to it first
+        if let Some(ref mut picker) = self.color_picker {
+            match picker.handle_event(&event) {
+                ColorPickerResult::Confirm(color) => {
+                    self.state.properties.color = color;
+                    self.color_picker = None;
+                    self.color_picker_surface = None;
+                    return Ok(true);
+                }
+                ColorPickerResult::Cancel => {
+                    self.color_picker = None;
+                    self.color_picker_surface = None;
+                    return Ok(true);
+                }
+                ColorPickerResult::StartEyedropper => {
+                    // Close color picker and start eyedropper
+                    let original_color = picker.current_color();
+                    self.color_picker = None;
+                    self.color_picker_surface = None;
+
+                    // Run eyedropper (this blocks until user picks or cancels)
+                    match self.run_eyedropper()? {
+                        Some(color) => {
+                            self.state.properties.color = color;
+                        }
+                        None => {
+                            // Cancelled - reopen picker with original color
+                            self.open_color_picker(original_color)?;
+                        }
+                    }
+                    return Ok(true);
+                }
+                ColorPickerResult::Changed => {
+                    // Color changed, redraw picker only
+                    self.redraw_color_picker()?;
+                    return Ok(false); // Don't redraw the whole overlay
+                }
+                ColorPickerResult::None => {
+                    // No change, no redraw needed
+                    return Ok(false);
+                }
+            }
+        }
+
         match &event {
             // Handle toolbar clicks
             InputEvent::MousePress(e) if e.position.y < 0 => {
                 // Click is in toolbar area (y < 0 because of offset)
                 let toolbar_pos = Point::new(e.position.x, e.position.y + self.image_offset_y);
-                if let Some(tool_type) = self.toolbar.handle_click(toolbar_pos) {
-                    self.select_tool(tool_type)?;
-                    needs_redraw = true;
+                match self.toolbar.handle_click(toolbar_pos) {
+                    ToolbarClickResult::Tool(tool_type) => {
+                        self.select_tool(tool_type)?;
+                        needs_redraw = true;
+                    }
+                    ToolbarClickResult::ColorPreview => {
+                        self.open_color_picker(self.state.properties.color)?;
+                        needs_redraw = true;
+                    }
+                    ToolbarClickResult::None => {}
                 }
                 return Ok(needs_redraw);
             }
@@ -535,6 +595,55 @@ impl AnnotationOverlay {
         Ok(())
     }
 
+    /// Open the color picker dialog.
+    fn open_color_picker(&mut self, initial_color: gartk_core::Color) -> Result<()> {
+        use crate::annotate::ui::{PICKER_HEIGHT, PICKER_WIDTH};
+
+        let screen_width = self.canvas.width();
+        let screen_height = self.canvas.height() + TOOLBAR_HEIGHT;
+
+        let picker = ColorPicker::new(initial_color, screen_width, screen_height);
+
+        // Create surface for color picker if needed
+        if self.color_picker_surface.is_none() {
+            self.color_picker_surface = Some(
+                Surface::new(PICKER_WIDTH, PICKER_HEIGHT)
+                    .context("Failed to create color picker surface")?,
+            );
+        }
+
+        self.color_picker = Some(picker);
+        Ok(())
+    }
+
+    /// Redraw just the color picker (not the whole overlay).
+    fn redraw_color_picker(&mut self) -> Result<()> {
+        if let (Some(picker), Some(surface)) = (&self.color_picker, &self.color_picker_surface) {
+            picker.draw(surface)?;
+            self.blit_color_picker()?;
+        }
+        Ok(())
+    }
+
+    /// Run the eyedropper to sample a color.
+    fn run_eyedropper(&mut self) -> Result<Option<gartk_core::Color>> {
+        use crate::annotate::ui::color_picker::eyedropper::{Eyedropper, EyedropperResult};
+
+        // Temporarily release our keyboard grab so eyedropper can grab
+        self.window.ungrab_keyboard()?;
+
+        let eyedropper = Eyedropper::new()?;
+        let result = eyedropper.run()?;
+
+        // Regrab keyboard for our window
+        self.window.grab_keyboard_with_retry(10, 50)?;
+
+        match result {
+            EyedropperResult::Color(color) => Ok(Some(color)),
+            EyedropperResult::Cancel => Ok(None),
+        }
+    }
+
     /// Redraw the overlay.
     fn redraw(&mut self) -> Result<()> {
         // Draw current tool preview
@@ -551,6 +660,12 @@ impl AnnotationOverlay {
 
         // Blit to window (toolbar + image)
         self.blit_to_window()?;
+
+        // Draw color picker if open
+        if let (Some(picker), Some(surface)) = (&self.color_picker, &self.color_picker_surface) {
+            picker.draw(surface)?;
+            self.blit_color_picker()?;
+        }
 
         self.needs_redraw = false;
 
@@ -597,6 +712,38 @@ impl AnnotationOverlay {
             height as u16,
             0,
             self.image_offset_y as i16,
+            &bgra,
+        )?;
+
+        self.conn.inner().flush()?;
+
+        Ok(())
+    }
+
+    /// Blit color picker to window.
+    fn blit_color_picker(&mut self) -> Result<()> {
+        use crate::annotate::ui::{PICKER_HEIGHT, PICKER_WIDTH};
+
+        let picker = self.color_picker.as_ref().ok_or_else(|| anyhow::anyhow!("No color picker"))?;
+        let surface = self.color_picker_surface.as_mut().ok_or_else(|| anyhow::anyhow!("No color picker surface"))?;
+
+        let rect = picker.rect();
+
+        // Get picker data and convert to BGRA
+        let data = surface.to_rgba()?;
+        let bgra = rgba_to_bgra(&data);
+
+        // Blit at picker position (adjusted for toolbar offset)
+        self.conn.inner().put_image(
+            ImageFormat::Z_PIXMAP,
+            self.window.id(),
+            self.gc,
+            PICKER_WIDTH as u16,
+            PICKER_HEIGHT as u16,
+            rect.x as i16,
+            (rect.y + self.image_offset_y) as i16,
+            0,
+            24,
             &bgra,
         )?;
 
