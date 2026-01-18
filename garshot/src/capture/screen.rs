@@ -1,7 +1,7 @@
 //! Full screen capture functionality.
 
 use crate::error::Result;
-use crate::x11::{shm::bgra_to_rgba, Connection, ShmCapture};
+use crate::x11::{shm::bgra_to_rgba_with_alpha, Connection, ShmCapture};
 
 /// Capture the full screen.
 ///
@@ -10,7 +10,8 @@ pub fn capture_full_screen(conn: &Connection, shm: &ShmCapture) -> Result<Captur
     let data = shm.capture(conn, 0, 0, conn.width, conn.height)?;
 
     // Convert BGRA (X11 format) to RGBA (standard format)
-    let rgba = bgra_to_rgba(data);
+    // Force opaque alpha when capturing from compositor overlay (which has alpha=0)
+    let rgba = bgra_to_rgba_with_alpha(data, conn.compositor_active);
 
     Ok(CaptureResult {
         data: rgba,

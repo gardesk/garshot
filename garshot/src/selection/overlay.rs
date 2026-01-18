@@ -55,7 +55,8 @@ pub fn interactive_selection(
     // 1. Capture current screen
     let capture_data = shm.capture(conn, 0, 0, conn.width, conn.height)?;
     // Convert BGRA to RGBA and copy to owned buffer
-    let original_data = crate::x11::shm::bgra_to_rgba(capture_data);
+    // Force opaque alpha when capturing from compositor overlay (which has alpha=0)
+    let original_data = crate::x11::shm::bgra_to_rgba_with_alpha(capture_data, conn.compositor_active);
 
     // 2. Apply blur for overlay background
     let mut blurred_data = original_data.clone();

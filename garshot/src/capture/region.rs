@@ -1,7 +1,7 @@
 //! Region capture functionality.
 
 use crate::error::{GarshotError, Result};
-use crate::x11::{shm::bgra_to_rgba, Connection, ShmCapture};
+use crate::x11::{shm::bgra_to_rgba_with_alpha, Connection, ShmCapture};
 
 /// A rectangular region on the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,7 +135,8 @@ pub fn capture_region(
     );
 
     let data = shm.capture(conn, clipped.x, clipped.y, clipped.width, clipped.height)?;
-    let rgba = bgra_to_rgba(data);
+    // Force opaque alpha when capturing from compositor overlay (which has alpha=0)
+    let rgba = bgra_to_rgba_with_alpha(data, conn.compositor_active);
 
     Ok(RegionCaptureResult {
         data: rgba,

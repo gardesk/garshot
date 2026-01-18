@@ -225,13 +225,22 @@ impl Drop for ShmCapture {
 /// This is necessary because X11 returns pixels in BGRA format, but most
 /// image formats expect RGBA.
 pub fn bgra_to_rgba(data: &[u8]) -> Vec<u8> {
+    bgra_to_rgba_with_alpha(data, false)
+}
+
+/// Convert BGRA pixel data (X11 format) to RGBA, optionally forcing opaque alpha.
+///
+/// When `force_opaque` is true, all alpha values are set to 255. This is needed
+/// when capturing from the compositor overlay window, which returns valid RGB
+/// data but with alpha=0 (transparent).
+pub fn bgra_to_rgba_with_alpha(data: &[u8], force_opaque: bool) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(data.len());
 
     for chunk in data.chunks_exact(4) {
         rgba.push(chunk[2]); // R (was B)
         rgba.push(chunk[1]); // G
         rgba.push(chunk[0]); // B (was R)
-        rgba.push(chunk[3]); // A
+        rgba.push(if force_opaque { 255 } else { chunk[3] }); // A
     }
 
     rgba
@@ -239,8 +248,16 @@ pub fn bgra_to_rgba(data: &[u8]) -> Vec<u8> {
 
 /// Convert BGRA pixel data to RGBA in place.
 pub fn bgra_to_rgba_inplace(data: &mut [u8]) {
+    bgra_to_rgba_inplace_with_alpha(data, false)
+}
+
+/// Convert BGRA pixel data to RGBA in place, optionally forcing opaque alpha.
+pub fn bgra_to_rgba_inplace_with_alpha(data: &mut [u8], force_opaque: bool) {
     for chunk in data.chunks_exact_mut(4) {
         chunk.swap(0, 2); // Swap B and R
+        if force_opaque {
+            chunk[3] = 255;
+        }
     }
 }
 
