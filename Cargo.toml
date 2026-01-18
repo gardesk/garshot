@@ -11,7 +11,7 @@ authors = ["mfwolffe"]
 
 [workspace.dependencies]
 # X11
-x11rb = { version = "0.13", features = ["randr", "shm", "xfixes", "shape"] }
+x11rb = { version = "0.13", features = ["randr", "shm", "xfixes", "shape", "composite"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full", "signal"] }

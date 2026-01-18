@@ -149,16 +149,20 @@ impl ShmCapture {
             )));
         }
 
+        // Use overlay window if compositor is active, otherwise use root
+        let drawable = conn.overlay_window.unwrap_or(conn.root);
+
         tracing::debug!(
-            "Capturing region {}x{}+{}+{} ({} bytes)",
-            width, height, x, y, byte_count
+            "Capturing region {}x{}+{}+{} ({} bytes) from drawable 0x{:x}{}",
+            width, height, x, y, byte_count, drawable,
+            if conn.compositor_active { " (compositor active)" } else { "" }
         );
 
         // Use shm_get_image to capture directly to shared memory
         let reply = conn
             .conn
             .shm_get_image(
-                conn.root,
+                drawable,
                 x,
                 y,
                 width,
