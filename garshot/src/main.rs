@@ -11,6 +11,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+use garshot::annotate::{AnnotationOverlay, AnnotationResult};
 use garshot::capture::{
     blend_cursor, capture_full_screen, capture_region, get_cursor_image, Region,
 };
@@ -61,6 +62,10 @@ enum Command {
         /// Show desktop notification on save.
         #[arg(long)]
         notify: bool,
+
+        /// Open annotation editor after capture.
+        #[arg(short, long)]
+        annotate: bool,
     },
 
     /// Capture a region by geometry.
@@ -92,6 +97,10 @@ enum Command {
         /// Show desktop notification on save.
         #[arg(long)]
         notify: bool,
+
+        /// Open annotation editor after capture.
+        #[arg(short, long)]
+        annotate: bool,
     },
 
     /// Capture a window.
@@ -127,6 +136,10 @@ enum Command {
         /// Show desktop notification on save.
         #[arg(long)]
         notify: bool,
+
+        /// Open annotation editor after capture.
+        #[arg(short, long)]
+        annotate: bool,
     },
 
     /// Interactive region selection with blur overlay.
@@ -154,6 +167,24 @@ enum Command {
         /// Show desktop notification on save.
         #[arg(long)]
         notify: bool,
+
+        /// Open annotation editor after capture.
+        #[arg(short, long)]
+        annotate: bool,
+    },
+
+    /// Annotate an existing image file.
+    Annotate {
+        /// Input image file to annotate.
+        file: PathBuf,
+
+        /// Output file path (default: overwrites input, use "-" for stdout).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Output format (defaults to input format).
+        #[arg(short, long)]
+        format: Option<String>,
     },
 
     /// List available monitors.
@@ -192,6 +223,7 @@ fn main() -> anyhow::Result<()> {
             no_clipboard,
             delay,
             notify,
+            annotate,
         }) => {
             if let Some(secs) = delay {
                 sleep_with_countdown(secs);
@@ -202,7 +234,23 @@ fn main() -> anyhow::Result<()> {
             } else {
                 Some(output.unwrap_or_else(|| default_output(&config, &format)))
             };
-            let (data, width, height) = capture_screen_raw(&format, monitor.as_deref(), cursor)?;
+            let (mut data, mut width, mut height) = capture_screen_raw(&format, monitor.as_deref(), cursor)?;
+
+            // Open annotation editor if requested
+            if annotate {
+                match run_annotation(&data, width, height)? {
+                    Some((new_data, new_w, new_h)) => {
+                        data = new_data;
+                        width = new_w;
+                        height = new_h;
+                    }
+                    None => {
+                        tracing::info!("Annotation cancelled");
+                        return Ok(());
+                    }
+                }
+            }
+
             if let Some(ref path) = output_path {
                 save_image(&data, width, height, path, &format)?;
                 if !no_clipboard {
@@ -225,6 +273,7 @@ fn main() -> anyhow::Result<()> {
             no_clipboard,
             delay,
             notify,
+            annotate,
         }) => {
             if let Some(secs) = delay {
                 sleep_with_countdown(secs);
@@ -235,7 +284,23 @@ fn main() -> anyhow::Result<()> {
             } else {
                 Some(output.unwrap_or_else(|| default_output(&config, &format)))
             };
-            let (data, width, height) = capture_region_raw(&geometry, cursor)?;
+            let (mut data, mut width, mut height) = capture_region_raw(&geometry, cursor)?;
+
+            // Open annotation editor if requested
+            if annotate {
+                match run_annotation(&data, width, height)? {
+                    Some((new_data, new_w, new_h)) => {
+                        data = new_data;
+                        width = new_w;
+                        height = new_h;
+                    }
+                    None => {
+                        tracing::info!("Annotation cancelled");
+                        return Ok(());
+                    }
+                }
+            }
+
             if let Some(ref path) = output_path {
                 save_image(&data, width, height, path, &format)?;
                 if !no_clipboard {
@@ -259,6 +324,7 @@ fn main() -> anyhow::Result<()> {
             no_clipboard,
             delay,
             notify,
+            annotate,
         }) => {
             if let Some(secs) = delay {
                 sleep_with_countdown(secs);
@@ -269,7 +335,23 @@ fn main() -> anyhow::Result<()> {
             } else {
                 Some(output.unwrap_or_else(|| default_output(&config, &format)))
             };
-            let (data, width, height) = capture_window_raw(id.as_deref(), decorations, cursor)?;
+            let (mut data, mut width, mut height) = capture_window_raw(id.as_deref(), decorations, cursor)?;
+
+            // Open annotation editor if requested
+            if annotate {
+                match run_annotation(&data, width, height)? {
+                    Some((new_data, new_w, new_h)) => {
+                        data = new_data;
+                        width = new_w;
+                        height = new_h;
+                    }
+                    None => {
+                        tracing::info!("Annotation cancelled");
+                        return Ok(());
+                    }
+                }
+            }
+
             if let Some(ref path) = output_path {
                 save_image(&data, width, height, path, &format)?;
                 if !no_clipboard {
@@ -291,6 +373,7 @@ fn main() -> anyhow::Result<()> {
             blur,
             no_clipboard,
             notify,
+            annotate,
         }) => {
             let is_stdout = output.as_ref().map(|p| p.as_os_str() == "-").unwrap_or(false);
             let output_path = if is_stdout {
@@ -298,7 +381,22 @@ fn main() -> anyhow::Result<()> {
             } else {
                 Some(output.unwrap_or_else(|| default_output(&config, &format)))
             };
-            if let Some((data, width, height)) = capture_select_raw(cursor, blur)? {
+            if let Some((mut data, mut width, mut height)) = capture_select_raw(cursor, blur)? {
+                // Open annotation editor if requested
+                if annotate {
+                    match run_annotation(&data, width, height)? {
+                        Some((new_data, new_w, new_h)) => {
+                            data = new_data;
+                            width = new_w;
+                            height = new_h;
+                        }
+                        None => {
+                            tracing::info!("Annotation cancelled");
+                            return Ok(());
+                        }
+                    }
+                }
+
                 if let Some(ref path) = output_path {
                     save_image(&data, width, height, path, &format)?;
                     if !no_clipboard {
@@ -327,6 +425,42 @@ fn main() -> anyhow::Result<()> {
                     m.y,
                     if m.primary { " (primary)" } else { "" }
                 );
+            }
+        }
+
+        Some(Command::Annotate { file, output, format }) => {
+            // Load image file
+            let img = image::open(&file).context("Failed to open image file")?;
+            let rgba = img.to_rgba8();
+            let width = rgba.width();
+            let height = rgba.height();
+            let data = rgba.into_raw();
+
+            tracing::info!("Opening annotation editor for {}", file.display());
+
+            // Run annotation
+            match run_annotation(&data, width, height)? {
+                Some((annotated_data, w, h)) => {
+                    // Determine output path and format
+                    let out_path = output.unwrap_or_else(|| file.clone());
+                    let is_stdout = out_path.as_os_str() == "-";
+                    let out_format = format.unwrap_or_else(|| {
+                        file.extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("png")
+                            .to_string()
+                    });
+
+                    if is_stdout {
+                        write_stdout(&annotated_data, w, h, &out_format)?;
+                    } else {
+                        save_image(&annotated_data, w, h, &out_path, &out_format)?;
+                        println!("{}", out_path.display());
+                    }
+                }
+                None => {
+                    tracing::info!("Annotation cancelled");
+                }
             }
         }
 
@@ -669,4 +803,22 @@ fn run_daemon() -> anyhow::Result<()> {
 
     tracing::info!("Daemon stopped");
     Ok(())
+}
+
+/// Run the annotation overlay and return the annotated image data.
+/// Returns None if the user cancelled.
+fn run_annotation(
+    data: &[u8],
+    width: u32,
+    height: u32,
+) -> anyhow::Result<Option<(Vec<u8>, u32, u32)>> {
+    let overlay = AnnotationOverlay::new(data, width, height)
+        .context("Failed to create annotation overlay")?;
+
+    match overlay.run().context("Annotation overlay failed")? {
+        AnnotationResult::Save { data, width, height } => {
+            Ok(Some((data, width, height)))
+        }
+        AnnotationResult::Cancel => Ok(None),
+    }
 }
