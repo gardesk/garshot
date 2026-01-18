@@ -289,7 +289,9 @@ impl Overlay {
         conn.conn.free_gc(self.gc)?;
         conn.conn.free_cursor(self.cursor)?;
         conn.conn.destroy_window(self.window)?;
-        conn.conn.flush()?;
+        // Sync to ensure window is fully destroyed before continuing
+        // This prevents the selection overlay from lingering when annotation opens
+        conn.conn.sync()?;
         Ok(())
     }
 
