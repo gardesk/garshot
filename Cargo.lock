@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "garshot"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -437,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "garshot-ipc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "garshotctl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "gartk-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "gartk-render"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cairo-rs",
  "gartk-core",
@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "gartk-x11"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "gartk-core",
  "thiserror",
