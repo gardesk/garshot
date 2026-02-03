@@ -121,14 +121,31 @@ pub fn load_config() -> Result<Config> {
             GarshotError::ConfigError(format!("Failed to read config file: {}", e))
         })?;
 
-        let config: Config = toml::from_str(&content).map_err(|e| {
+        let mut config: Config = toml::from_str(&content).map_err(|e| {
             GarshotError::ConfigError(format!("Failed to parse config file: {}", e))
         })?;
+
+        // Expand tilde in save_dir
+        config.general.save_dir = expand_tilde(&config.general.save_dir);
 
         Ok(config)
     } else {
         tracing::debug!("No config file found, using defaults");
         Ok(Config::default())
+    }
+}
+
+/// Expand leading `~` in a path to the user's home directory.
+fn expand_tilde(path: &PathBuf) -> PathBuf {
+    let path_str = path.to_string_lossy();
+    if path_str == "~" {
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+    } else if let Some(rest) = path_str.strip_prefix("~/") {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(rest)
+    } else {
+        path.clone()
     }
 }
 
@@ -193,5 +210,35 @@ mod tests {
         assert_eq!(config.selection.blur_radius, 20);
         assert_eq!(config.selection.line_color, "#00ff00");
         assert_eq!(config.naming.pattern, "shot-date");
+    }
+
+    #[test]
+    fn test_expand_tilde() {
+        let home = dirs::home_dir().unwrap();
+
+        // ~/foo/bar should expand
+        let path = PathBuf::from("~/Pictures/Screenshots");
+        let expanded = expand_tilde(&path);
+        assert_eq!(expanded, home.join("Pictures/Screenshots"));
+
+        // Just ~ should expand to home
+        let path = PathBuf::from("~");
+        let expanded = expand_tilde(&path);
+        assert_eq!(expanded, home);
+
+        // Absolute paths should not change
+        let path = PathBuf::from("/tmp/screenshots");
+        let expanded = expand_tilde(&path);
+        assert_eq!(expanded, PathBuf::from("/tmp/screenshots"));
+
+        // Relative paths should not change
+        let path = PathBuf::from("screenshots");
+        let expanded = expand_tilde(&path);
+        assert_eq!(expanded, PathBuf::from("screenshots"));
+
+        // Tilde in middle should not expand
+        let path = PathBuf::from("/foo/~/bar");
+        let expanded = expand_tilde(&path);
+        assert_eq!(expanded, PathBuf::from("/foo/~/bar"));
     }
 }
